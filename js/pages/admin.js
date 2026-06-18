@@ -11,8 +11,20 @@ function initAdminPage(titulo) {
   return usuario;
 }
 
-function getFacultadAdmin(usuario) {
-  return DB.getFacultadById(usuario.facultad_id);
+/* Facultad administrada por este usuario (Facultad.admin === usuario.id) */
+async function getFacultadAdmin(usuario) {
+  const facs = await API.facultades();
+  return facs.find(f => f.admin === usuario.id) || null;
+}
+
+/* Cuenta estudiantes unicos a lo largo de una lista de cursos */
+async function contarEstudiantesUnicos(cursos) {
+  const listas = await Promise.all(cursos.map(c => API.inscripciones(c.id)));
+  const ids = new Set();
+  listas.forEach(ins => ins
+    .filter(i => i.rol_en_curso === "ESTUDIANTE")
+    .forEach(i => ids.add(i.usuario)));
+  return ids.size;
 }
 
 /* ── UTILS (reutilizadas del superadmin) ─────────────────── */
@@ -33,48 +45,48 @@ function formatFecha(f) {
 
 /* ── DASHBOARD ADMIN ─────────────────────────────────────── */
 const AdminDashboard = {
-  init() {
+  async init() {
     const usuario = initAdminPage("Dashboard");
     if (!usuario) return;
+    try {
+      const [facultad, cursosF] = await Promise.all([
+        getFacultadAdmin(usuario), API.cursos()
+      ]);
 
-    const facultad = getFacultadAdmin(usuario);
-    const nombreFac = document.getElementById("nombre-facultad");
-    if (nombreFac) nombreFac.textContent = facultad ? facultad.nombre : "Mi Facultad";
+      const nombreFac = document.getElementById("nombre-facultad");
+      if (nombreFac) nombreFac.textContent = facultad ? facultad.nombre : "Mi Facultad";
 
-    const cursosF   = facultad ? DB.cursos.filter(c => c.facultad_id === facultad.id) : [];
-    const activos   = cursosF.filter(c => c.estado === "activo").length;
-    const estudiantesIds = new Set(
-      cursosF.flatMap(c => DB.getEstudiantesByCurso(c.id).map(e => e.id))
-    );
-    const profesoresIds = new Set(
-      DB.inscripciones
-        .filter(i => cursosF.some(c => c.id === i.curso_id) && i.rol_en_curso === "PROFESOR")
-        .map(i => i.usuario_id)
-    );
+      const activos = cursosF.filter(c => c.estado === "activo").length;
 
-    document.getElementById("kpi-cursos").textContent      = activos;
-    document.getElementById("kpi-estudiantes").textContent = estudiantesIds.size;
-    document.getElementById("kpi-profesores").textContent  = profesoresIds.size;
-    document.getElementById("kpi-tasa").textContent        = "68%";
+      /* Estudiantes y profesores unicos */
+      const inscLists = await Promise.all(cursosF.map(c => API.inscripciones(c.id)));
+      const estudiantes = new Set();
+      const profesores  = new Set();
+      inscLists.forEach(ins => ins.forEach(i => {
+        if (i.rol_en_curso === "ESTUDIANTE") estudiantes.add(i.usuario);
+        if (i.rol_en_curso === "PROFESOR")   profesores.add(i.usuario);
+      }));
 
-    /* Tabla cursos recientes */
-    const tbody = document.getElementById("tabla-cursos-recientes");
-    if (!tbody) return;
-    const recientes = cursosF.slice(0, 5);
-    if (!recientes.length) {
-      tbody.innerHTML = `<tr><td colspan="4"><div class="empty-state"><i class="bi-book"></i><p>Sin cursos en esta facultad.</p></div></td></tr>`;
-      return;
-    }
-    tbody.innerHTML = recientes.map(c => {
-      const prof = DB.getUsuarioById(c.profesor_id);
-      return `
+      document.getElementById("kpi-cursos").textContent      = activos;
+      document.getElementById("kpi-estudiantes").textContent = estudiantes.size;
+      document.getElementById("kpi-profesores").textContent  = profesores.size;
+      document.getElementById("kpi-tasa").textContent        = "68%";
+
+      const tbody = document.getElementById("tabla-cursos-recientes");
+      if (!tbody) return;
+      const recientes = cursosF.slice(0, 5);
+      if (!recientes.length) {
+        tbody.innerHTML = `<tr><td colspan="4"><div class="empty-state"><i class="bi-book"></i><p>Sin cursos en esta facultad.</p></div></td></tr>`;
+        return;
+      }
+      tbody.innerHTML = recientes.map(c => `
         <tr>
           <td class="fw-semibold text-sm">${c.nombre}</td>
-          <td class="text-sm">${prof ? `${prof.nombres} ${prof.apellidos}` : "—"}</td>
+          <td class="text-sm">${c.profesor_nombre || "—"}</td>
           <td>${badgeCursoEstado(c.estado)}</td>
           <td class="text-sm text-muted">${formatFecha(c.fecha_fin)}</td>
-        </tr>`;
-    }).join("");
+        </tr>`).join("");
+    } catch (e) { AdminNotif.show(e.message, "danger"); }
   }
 };
 
@@ -82,36 +94,36 @@ const AdminDashboard = {
 const AdminUsuarios = {
   filtro: "",
   usuario: null,
+  _data: [],
 
-  init() {
+  async init() {
     const usuario = initAdminPage("Usuarios de Facultad");
     if (!usuario) return;
     this.usuario = usuario;
-    this.renderTabla();
     const buscador = document.getElementById("buscador");
-    if (buscador) {
-      buscador.addEventListener("input", e => {
-        this.filtro = e.target.value.toLowerCase();
-        this.renderTabla();
-      });
-    }
+    if (buscador) buscador.addEventListener("input", e => {
+      this.filtro = e.target.value.toLowerCase();
+      this.renderTabla();
+    });
+    try {
+      this._data = await this.getUsuariosFacultad();
+      this.renderTabla();
+    } catch (e) { AdminNotif.show(e.message, "danger"); }
   },
 
-  getUsuariosFacultad() {
-    const facultad = getFacultadAdmin(this.usuario);
-    if (!facultad) return DB.usuarios.filter(u => u.rol === "USER");
-    /* Usuarios inscritos en cursos de esta facultad */
-    const cursosFac = DB.cursos.filter(c => c.facultad_id === facultad.id).map(c => c.id);
-    const ids = new Set(
-      DB.inscripciones.filter(i => cursosFac.includes(i.curso_id)).map(i => i.usuario_id)
-    );
-    return DB.usuarios.filter(u => ids.has(u.id));
+  async getUsuariosFacultad() {
+    const [usuarios, cursosFac] = await Promise.all([API.usuarios(), API.cursos()]);
+    if (!cursosFac.length) return usuarios.filter(u => u.rol === "USER");
+    const inscLists = await Promise.all(cursosFac.map(c => API.inscripciones(c.id)));
+    const ids = new Set();
+    inscLists.forEach(ins => ins.forEach(i => ids.add(i.usuario)));
+    return usuarios.filter(u => ids.has(u.id));
   },
 
   renderTabla() {
     const tbody = document.getElementById("tabla-usuarios");
     if (!tbody) return;
-    const lista = this.getUsuariosFacultad().filter(u =>
+    const lista = this._data.filter(u =>
       u.nombres.toLowerCase().includes(this.filtro) ||
       u.apellidos.toLowerCase().includes(this.filtro) ||
       u.identificacion.includes(this.filtro)
@@ -124,7 +136,7 @@ const AdminUsuarios = {
       <tr>
         <td>
           <div style="display:flex;align-items:center;gap:8px">
-            <div class="avatar avatar-sm">${DB.iniciales(u.nombres, u.apellidos)}</div>
+            <div class="avatar avatar-sm">${u.iniciales}</div>
             <div>
               <div class="fw-semibold text-sm">${u.nombres} ${u.apellidos}</div>
               <div class="text-xs text-muted">${u.correo}</div>
@@ -133,7 +145,7 @@ const AdminUsuarios = {
         </td>
         <td class="text-sm">${u.identificacion}</td>
         <td class="text-sm">${u.celular}</td>
-        <td class="text-sm">${u.estadoCivil}</td>
+        <td class="text-sm">${u.estado_civil}</td>
         <td>${badgeEstado(u.estado)}</td>
         <td>
           <div class="table-actions">
@@ -148,12 +160,14 @@ const AdminUsuarios = {
       </tr>`).join("");
   },
 
-  toggleEstado(id) {
-    const u = DB.getUsuarioById(id);
-    if (!u) return;
-    u.estado = u.estado === "activo" ? "inactivo" : "activo";
-    this.renderTabla();
-    AdminNotif.show(`Estado de ${u.nombres} cambiado a <strong>${u.estado}</strong>.`, "success");
+  async toggleEstado(id) {
+    try {
+      await API.toggleEstado(id);
+      const u = this._data.find(x => x.id === id);
+      if (u) u.estado = u.estado === "activo" ? "inactivo" : "activo";
+      this.renderTabla();
+      AdminNotif.show("Estado actualizado.", "success");
+    } catch (e) { AdminNotif.show(e.message, "danger"); }
   }
 };
 
@@ -163,7 +177,7 @@ const AdminModalUsuario = {
 
   abrir(id) {
     this.usuarioId = id;
-    const u = DB.getUsuarioById(id);
+    const u = AdminUsuarios._data.find(x => x.id === id);
     if (!u) return;
     document.getElementById("af-nombres").value       = u.nombres;
     document.getElementById("af-apellidos").value     = u.apellidos;
@@ -172,7 +186,7 @@ const AdminModalUsuario = {
     document.getElementById("af-telefono").value      = u.telefono || "";
     document.getElementById("af-correo").value        = u.correo;
     document.getElementById("af-direccion").value     = u.direccion || "";
-    document.getElementById("af-estado-civil").value  = u.estadoCivil;
+    document.getElementById("af-estado-civil").value  = u.estado_civil;
     document.getElementById("af-estado").value        = u.estado;
     document.getElementById("modal-admin-usuario").classList.add("open");
   },
@@ -181,21 +195,26 @@ const AdminModalUsuario = {
     document.getElementById("modal-admin-usuario").classList.remove("open");
   },
 
-  guardar() {
-    const u = DB.getUsuarioById(this.usuarioId);
-    if (!u) return;
-    u.nombres       = document.getElementById("af-nombres").value.trim()       || u.nombres;
-    u.apellidos     = document.getElementById("af-apellidos").value.trim()     || u.apellidos;
-    u.identificacion= document.getElementById("af-identificacion").value.trim()|| u.identificacion;
-    u.celular       = document.getElementById("af-celular").value.trim()       || u.celular;
-    u.telefono      = document.getElementById("af-telefono").value.trim()      || null;
-    u.correo        = document.getElementById("af-correo").value.trim()        || u.correo;
-    u.direccion     = document.getElementById("af-direccion").value.trim()     || null;
-    u.estadoCivil   = document.getElementById("af-estado-civil").value;
-    u.estado        = document.getElementById("af-estado").value;
-    this.cerrar();
-    AdminUsuarios.renderTabla();
-    AdminNotif.show("Usuario actualizado correctamente.", "success");
+  async guardar() {
+    const campos = {
+      nombres:        document.getElementById("af-nombres").value.trim(),
+      apellidos:      document.getElementById("af-apellidos").value.trim(),
+      identificacion: document.getElementById("af-identificacion").value.trim(),
+      celular:        document.getElementById("af-celular").value.trim(),
+      telefono:       document.getElementById("af-telefono").value.trim() || null,
+      correo:         document.getElementById("af-correo").value.trim(),
+      direccion:      document.getElementById("af-direccion").value.trim() || null,
+      estado_civil:   document.getElementById("af-estado-civil").value,
+      estado:         document.getElementById("af-estado").value,
+    };
+    try {
+      const updated = await API.actualizarUsuario(this.usuarioId, campos);
+      const idx = AdminUsuarios._data.findIndex(x => x.id === this.usuarioId);
+      if (idx !== -1) AdminUsuarios._data[idx] = { ...AdminUsuarios._data[idx], ...updated };
+      this.cerrar();
+      AdminUsuarios.renderTabla();
+      AdminNotif.show("Usuario actualizado correctamente.", "success");
+    } catch (e) { AdminNotif.show(e.message, "danger"); }
   }
 };
 
@@ -203,39 +222,35 @@ const AdminModalUsuario = {
 const AdminCursos = {
   usuario: null,
 
-  init() {
+  async init() {
     const usuario = initAdminPage("Cursos de Facultad");
     if (!usuario) return;
     this.usuario = usuario;
-    this.renderTabla();
+    try {
+      const cursos = await API.cursos();
+      this.renderTabla(cursos);
+    } catch (e) { AdminNotif.show(e.message, "danger"); }
   },
 
-  renderTabla() {
+  renderTabla(cursos) {
     const tbody = document.getElementById("tabla-cursos");
     if (!tbody) return;
-    const facultad  = getFacultadAdmin(this.usuario);
-    const cursos    = facultad ? DB.cursos.filter(c => c.facultad_id === facultad.id) : DB.cursos;
-
     if (!cursos.length) {
       tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state"><i class="bi-book"></i><p>No hay cursos en esta facultad.</p></div></td></tr>`;
       return;
     }
-    tbody.innerHTML = cursos.map(c => {
-      const prof  = DB.getUsuarioById(c.profesor_id);
-      const estuCount = DB.getEstudiantesByCurso(c.id).length;
-      return `
-        <tr>
-          <td>
-            <div class="fw-semibold text-sm">${c.nombre}</div>
-            <div class="text-xs text-muted">${c.codigo}</div>
-          </td>
-          <td class="text-sm">${prof ? `${prof.nombres} ${prof.apellidos}` : "—"}</td>
-          <td class="text-sm">${estuCount} estudiantes</td>
-          <td class="text-sm">${formatFecha(c.fecha_inicio)}</td>
-          <td class="text-sm">${formatFecha(c.fecha_fin)}</td>
-          <td>${badgeCursoEstado(c.estado)}</td>
-        </tr>`;
-    }).join("");
+    tbody.innerHTML = cursos.map(c => `
+      <tr>
+        <td>
+          <div class="fw-semibold text-sm">${c.nombre}</div>
+          <div class="text-xs text-muted">${c.codigo}</div>
+        </td>
+        <td class="text-sm">${c.profesor_nombre || "—"}</td>
+        <td class="text-sm">${c.total_estudiantes} estudiantes</td>
+        <td class="text-sm">${formatFecha(c.fecha_inicio)}</td>
+        <td class="text-sm">${formatFecha(c.fecha_fin)}</td>
+        <td>${badgeCursoEstado(c.estado)}</td>
+      </tr>`).join("");
   }
 };
 
@@ -243,45 +258,44 @@ const AdminCursos = {
 const AdminReportes = {
   usuario: null,
 
-  init() {
+  async init() {
     const usuario = initAdminPage("Reportes");
     if (!usuario) return;
     this.usuario = usuario;
+    try {
+      const [facultad, cursos] = await Promise.all([
+        getFacultadAdmin(usuario), API.cursos()
+      ]);
+      const fNombre = document.getElementById("nombre-facultad");
+      if (fNombre) fNombre.textContent = facultad ? facultad.nombre : "Mi Facultad";
 
-    const facultad = getFacultadAdmin(usuario);
-    const fNombre  = document.getElementById("nombre-facultad");
-    if (fNombre) fNombre.textContent = facultad ? facultad.nombre : "Mi Facultad";
+      const estudiantesUnicos = await contarEstudiantesUnicos(cursos);
+      document.getElementById("r-cursos").textContent      = cursos.length;
+      document.getElementById("r-estudiantes").textContent = estudiantesUnicos;
 
-    const cursos    = facultad ? DB.cursos.filter(c => c.facultad_id === facultad.id) : [];
-    const estudIds  = new Set(cursos.flatMap(c => DB.getEstudiantesByCurso(c.id).map(e => e.id)));
-
-    document.getElementById("r-cursos").textContent      = cursos.length;
-    document.getElementById("r-estudiantes").textContent = estudIds.size;
-
-    const tbody = document.getElementById("tabla-reportes");
-    if (!tbody) return;
-    if (!cursos.length) {
-      tbody.innerHTML = `<tr><td colspan="4"><div class="empty-state"><i class="bi-bar-chart"></i><p>Sin datos para esta facultad.</p></div></td></tr>`;
-      return;
-    }
-    tbody.innerHTML = cursos.map(c => {
-      const prof  = DB.getUsuarioById(c.profesor_id);
-      const count = DB.getEstudiantesByCurso(c.id).length;
-      const tasa  = Math.floor(Math.random() * 30) + 60;
-      const badge = tasa >= 70
-        ? `<span class="badge badge-success">${tasa}%</span>`
-        : `<span class="badge badge-warning">${tasa}%</span>`;
-      return `
-        <tr>
-          <td>
-            <div class="fw-semibold text-sm">${c.nombre}</div>
-            <div class="text-xs text-muted">${c.codigo}</div>
-          </td>
-          <td class="text-sm">${prof ? `${prof.nombres} ${prof.apellidos}` : "—"}</td>
-          <td class="text-sm">${count}</td>
-          <td>${badge} <span class="text-xs text-muted">aprobacion</span></td>
-        </tr>`;
-    }).join("");
+      const tbody = document.getElementById("tabla-reportes");
+      if (!tbody) return;
+      if (!cursos.length) {
+        tbody.innerHTML = `<tr><td colspan="4"><div class="empty-state"><i class="bi-bar-chart"></i><p>Sin datos para esta facultad.</p></div></td></tr>`;
+        return;
+      }
+      tbody.innerHTML = cursos.map(c => {
+        const tasa  = Math.floor(Math.random() * 30) + 60;
+        const badge = tasa >= 70
+          ? `<span class="badge badge-success">${tasa}%</span>`
+          : `<span class="badge badge-warning">${tasa}%</span>`;
+        return `
+          <tr>
+            <td>
+              <div class="fw-semibold text-sm">${c.nombre}</div>
+              <div class="text-xs text-muted">${c.codigo}</div>
+            </td>
+            <td class="text-sm">${c.profesor_nombre || "—"}</td>
+            <td class="text-sm">${c.total_estudiantes}</td>
+            <td>${badge} <span class="text-xs text-muted">aprobacion</span></td>
+          </tr>`;
+      }).join("");
+    } catch (e) { AdminNotif.show(e.message, "danger"); }
   }
 };
 

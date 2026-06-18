@@ -12,7 +12,17 @@ from evaluaciones.models import Tarea, Entrega, Quiz, Pregunta, RespuestaQuiz
 class Command(BaseCommand):
     help = 'Poblar la base de datos con datos de prueba'
 
+    def add_arguments(self, parser):
+        parser.add_argument(
+            '--if-empty', action='store_true',
+            help='Solo sembrar si no existen usuarios (no borra datos existentes).'
+        )
+
     def handle(self, *args, **options):
+        if options.get('if_empty') and Usuario.objects.exists():
+            self.stdout.write('La base de datos ya tiene datos; se omite el sembrado.')
+            return
+
         self.stdout.write('Limpiando datos anteriores...')
         RespuestaQuiz.objects.all().delete()
         Pregunta.objects.all().delete()

@@ -13,6 +13,9 @@ urlpatterns = [
     path('api/', include('cursos.urls')),
     path('api/', include('evaluaciones.urls')),
 
+    # Raiz -> index.html (login)
+    re_path(r'^$', serve, {'document_root': FRONTEND, 'path': 'index.html'}),
+
     # Sirve TODOS los archivos del frontend directamente desde la raiz del proyecto
     # (CSS, JS, HTML, imagenes) — funciona con rutas relativas en el HTML
     re_path(r'^(?P<path>.*)$', serve, {'document_root': FRONTEND}),

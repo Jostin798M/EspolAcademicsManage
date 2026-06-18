@@ -105,11 +105,18 @@ class MaterialSerializer(serializers.ModelSerializer):
 
 class ModuloSerializer(serializers.ModelSerializer):
     materiales = MaterialSerializer(many=True, read_only=True)
+    completado = serializers.SerializerMethodField()
 
     class Meta:
         model  = Modulo
-        fields = ['id', 'curso', 'titulo', 'descripcion', 'orden', 'materiales']
+        fields = ['id', 'curso', 'titulo', 'descripcion', 'orden', 'materiales', 'completado']
         read_only_fields = ['curso']
+
+    def get_completado(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.progresos.filter(usuario=request.user, completado=True).exists()
+        return False
 
 
 class ProgresoModuloSerializer(serializers.ModelSerializer):

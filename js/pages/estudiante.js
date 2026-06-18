@@ -13,6 +13,9 @@ function initEstudiantePage(titulo) {
 
 function getParams() { return new URLSearchParams(window.location.search); }
 
+function minimoAprobacion() { return parseInt(localStorage.getItem("porcentaje_minimo") || "60"); }
+function num(v) { return v === null || v === undefined || v === "" ? null : Number(v); }
+
 function formatFechaE(f) {
   if (!f) return "—";
   return new Date(f).toLocaleDateString("es-EC", { day:"2-digit", month:"short", year:"numeric" });
@@ -50,23 +53,31 @@ function ENotif(mensaje, tipo = "success") {
 
 /* ── MIS CURSOS ──────────────────────────────────────────── */
 const MisCursosEstudiante = {
-  init() {
+  async init() {
     const u = initEstudiantePage("Mis Cursos");
     if (!u) return;
-    const cursos   = DB.getCursosByEstudiante(u.id);
-    const activos  = cursos.filter(c => c.estado === "activo");
-    const archivados = cursos.filter(c => c.estado === "archivado");
+    try {
+      const todos  = await API.cursos();
+      const cursos = todos.filter(c => c.mi_rol === "ESTUDIANTE");
+      const activos    = cursos.filter(c => c.estado === "activo");
+      const archivados = cursos.filter(c => c.estado === "archivado");
 
-    this.renderGrid("grid-activos", activos, u.id);
-    this.renderGrid("grid-archivados", archivados, u.id);
-    const secArch = document.getElementById("sec-archivados");
-    if (secArch) secArch.style.display = archivados.length ? "block" : "none";
+      /* Progreso por curso (en paralelo) */
+      const progresos = await Promise.all(cursos.map(c => API.progresoCurso(c.id).catch(() => ({ porcentaje: 0 }))));
+      const pctById = {};
+      cursos.forEach((c, i) => { pctById[c.id] = progresos[i].porcentaje; });
 
-    const kpiEl = document.getElementById("kpi-cursos");
-    if (kpiEl) kpiEl.textContent = activos.length;
+      this.renderGrid("grid-activos", activos, pctById);
+      this.renderGrid("grid-archivados", archivados, pctById);
+      const secArch = document.getElementById("sec-archivados");
+      if (secArch) secArch.style.display = archivados.length ? "block" : "none";
+
+      const kpiEl = document.getElementById("kpi-cursos");
+      if (kpiEl) kpiEl.textContent = activos.length;
+    } catch (e) { ENotif(e.message, "danger"); }
   },
 
-  renderGrid(containerId, cursos, usuarioId) {
+  renderGrid(containerId, cursos, pctById) {
     const el = document.getElementById(containerId);
     if (!el) return;
     if (!cursos.length) {
@@ -74,18 +85,16 @@ const MisCursosEstudiante = {
       return;
     }
     el.innerHTML = cursos.map(c => {
-      const fac = DB.getFacultadById(c.facultad_id);
-      const pct = DB.getProgresoCurso(usuarioId, c.id);
-      const prof = DB.getUsuarioById(c.profesor_id);
+      const pct = pctById[c.id] || 0;
       return `
         <div class="course-card">
           <div class="course-card-header">
             <h4>${c.nombre}</h4>
-            <span>${fac ? fac.codigo : "—"} &bull; ${c.codigo}</span>
+            <span>${c.facultad_codigo || "—"} &bull; ${c.codigo}</span>
           </div>
           <div class="course-card-body">
             <p class="text-sm" style="margin:0 0 10px;-webkit-line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden">${c.descripcion}</p>
-            ${prof ? `<p class="text-xs text-muted" style="margin:0 0 10px"><i class="bi-person-workspace"></i> ${prof.nombres} ${prof.apellidos}</p>` : ""}
+            ${c.profesor_nombre ? `<p class="text-xs text-muted" style="margin:0 0 10px"><i class="bi-person-workspace"></i> ${c.profesor_nombre}</p>` : ""}
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
               <div class="progress-bar" style="flex:1"><div class="progress-fill ${pct===100?"success":""}" style="width:${pct}%"></div></div>
               <span class="text-xs text-muted">${pct}%</span>
@@ -104,23 +113,25 @@ const MisCursosEstudiante = {
 
 /* ── CURSO (vista estudiante) ────────────────────────────── */
 const CursoEstudiante = {
-  init() {
+  async init() {
     const u = initEstudiantePage("Curso");
     if (!u) return;
     const id = parseInt(getParams().get("id"));
-    const curso = DB.getCursoById(id);
+    let curso;
+    try { curso = await API.cursoDetalle(id); }
+    catch { window.location.href = "mis-cursos.html"; return; }
     if (!curso) { window.location.href = "mis-cursos.html"; return; }
 
-    const fac  = DB.getFacultadById(curso.facultad_id);
-    const prof = DB.getUsuarioById(curso.profesor_id);
-    const pct  = DB.getProgresoCurso(u.id, id);
+    const prog = await API.progresoCurso(id).catch(() => ({ porcentaje: 0 }));
+    const pct  = prog.porcentaje;
 
     document.getElementById("curso-nombre").textContent = curso.nombre;
     document.getElementById("curso-descripcion").textContent = curso.descripcion;
     document.getElementById("curso-codigo").innerHTML   = `<span class="badge badge-primary">${curso.codigo}</span>`;
-    document.getElementById("curso-facultad").textContent = fac ? fac.nombre : "—";
+    document.getElementById("curso-facultad").textContent = curso.facultad_nombre || "—";
     document.getElementById("curso-fechas").textContent = `${formatFechaE(curso.fecha_inicio)} — ${formatFechaE(curso.fecha_fin)}`;
-    if (prof) document.getElementById("curso-profesor").textContent = `${prof.nombres} ${prof.apellidos}`;
+    const profEl = document.getElementById("curso-profesor");
+    if (profEl && curso.profesor_nombre) profEl.textContent = curso.profesor_nombre;
 
     const pctEl = document.getElementById("progreso-pct");
     const barEl = document.getElementById("progreso-bar");
@@ -132,23 +143,23 @@ const CursoEstudiante = {
       if (aviso) aviso.style.display = "flex";
     }
 
-    this.renderModulos(id, u.id);
-    this.renderTareasPendientes(id, u.id);
-    this.renderQuizzesPendientes(id, u.id);
+    this.renderModulos(id);
+    this.renderTareasPendientes(id);
+    this.renderQuizzesPendientes(id);
   },
 
-  renderModulos(cursoId, usuarioId) {
+  async renderModulos(cursoId) {
     const el = document.getElementById("lista-modulos");
     if (!el) return;
-    const modulos = DB.getModulosByCurso(cursoId);
+    let modulos = [];
+    try { modulos = await API.modulos(cursoId); } catch (e) { ENotif(e.message, "danger"); }
     if (!modulos.length) {
       el.innerHTML = `<div class="empty-state"><i class="bi-collection"></i><p>No hay modulos disponibles aun.</p></div>`;
       return;
     }
     el.innerHTML = modulos.map(m => {
-      const progreso = DB.progreso_modulos.find(p => p.modulo_id === m.id && p.usuario_id === usuarioId);
-      const completado = progreso && progreso.completado;
-      const mats = DB.getMaterialesByModulo(m.id).length;
+      const completado = !!m.completado;
+      const mats = (m.materiales || []).length;
       return `
         <a href="modulo.html?modulo_id=${m.id}&curso_id=${cursoId}" style="text-decoration:none">
           <div class="module-item" style="cursor:pointer;transition:background .15s" onmouseover="this.style.background='#F9FAFB'" onmouseout="this.style.background=''">
@@ -163,14 +174,13 @@ const CursoEstudiante = {
     }).join("");
   },
 
-  renderTareasPendientes(cursoId, usuarioId) {
+  async renderTareasPendientes(cursoId) {
     const el = document.getElementById("lista-tareas");
     if (!el) return;
-    const tareas = DB.getTareasByCurso(cursoId);
-    const pendientes = tareas.filter(t => {
-      const e = DB.getEntregaByTareaYUsuario(t.id, usuarioId);
-      return !e || e.estado === "pendiente";
-    });
+    let tareas = [];
+    try { tareas = await API.tareas(cursoId); } catch (e) { ENotif(e.message, "danger"); }
+    const entregas = await Promise.all(tareas.map(t => API.miEntrega(t.id).catch(() => ({ estado: "pendiente" }))));
+    const pendientes = tareas.filter((t, i) => entregas[i].estado !== "entregado");
     if (!pendientes.length) {
       el.innerHTML = `<div class="empty-state" style="padding:20px"><i class="bi-check2-all"></i><p>Sin tareas pendientes.</p></div>`;
       return;
@@ -190,11 +200,13 @@ const CursoEstudiante = {
     }).join("");
   },
 
-  renderQuizzesPendientes(cursoId, usuarioId) {
+  async renderQuizzesPendientes(cursoId) {
     const el = document.getElementById("lista-quizzes");
     if (!el) return;
-    const quizzes = DB.getQuizzesByCurso(cursoId);
-    const pendientes = quizzes.filter(q => !DB.respuestas_quiz.find(r => r.usuario_id === usuarioId && r.quiz_id === q.id));
+    let quizzes = [];
+    try { quizzes = await API.quizzes(cursoId); } catch (e) { ENotif(e.message, "danger"); }
+    const resps = await Promise.all(quizzes.map(q => API.respuestasQuiz(q.id).catch(() => [])));
+    const pendientes = quizzes.filter((q, i) => resps[i].length === 0);
     if (!pendientes.length) {
       el.innerHTML = `<div class="empty-state" style="padding:20px"><i class="bi-check2-all"></i><p>Sin quizzes pendientes.</p></div>`;
       return;
@@ -220,39 +232,41 @@ const CursoEstudiante = {
 
 /* ── MODULO (vista estudiante) ───────────────────────────── */
 const ModuloEstudiante = {
-  init() {
+  _modulos: [],
+
+  async init() {
     const u = initEstudiantePage("Modulo");
     if (!u) return;
     const modulo_id = parseInt(getParams().get("modulo_id"));
     const curso_id  = parseInt(getParams().get("curso_id"));
-    const m = DB.modulos.find(m => m.id === modulo_id);
+    try { this._modulos = await API.modulos(curso_id); }
+    catch { window.location.href = `curso.html?id=${curso_id}`; return; }
+    const m = this._modulos.find(m => m.id === modulo_id);
     if (!m) { window.location.href = `curso.html?id=${curso_id}`; return; }
 
     document.getElementById("modulo-titulo").textContent     = m.titulo;
     document.getElementById("modulo-descripcion").textContent= m.descripcion || "";
     document.getElementById("btn-volver").href               = `curso.html?id=${curso_id}`;
 
-    const progreso    = DB.progreso_modulos.find(p => p.modulo_id === modulo_id && p.usuario_id === u.id);
-    const completado  = progreso && progreso.completado;
-    const btnComp     = document.getElementById("btn-completar");
+    const completado = !!m.completado;
+    const btnComp    = document.getElementById("btn-completar");
     if (btnComp) {
       if (completado) {
         btnComp.textContent = "Modulo completado";
         btnComp.disabled    = true;
         btnComp.className   = "btn btn-ghost btn-sm";
       } else {
-        btnComp.onclick = () => this.marcarCompletado(modulo_id, u.id, curso_id);
+        btnComp.onclick = () => this.marcarCompletado(modulo_id);
       }
     }
 
-    this.renderMateriales(modulo_id);
+    this.renderMateriales(m.materiales || []);
     this.renderNavegacion(modulo_id, curso_id);
   },
 
-  renderMateriales(modulo_id) {
+  renderMateriales(mats) {
     const el = document.getElementById("lista-materiales");
     if (!el) return;
-    const mats = DB.getMaterialesByModulo(modulo_id);
     if (!mats.length) {
       el.innerHTML = `<div class="empty-state"><i class="bi-folder2-open"></i><p>Este modulo no tiene materiales aun.</p></div>`;
       return;
@@ -279,7 +293,7 @@ const ModuloEstudiante = {
   },
 
   renderNavegacion(modulo_id, curso_id) {
-    const modulos = DB.getModulosByCurso(curso_id).sort((a, b) => a.orden - b.orden);
+    const modulos = [...this._modulos].sort((a, b) => a.orden - b.orden);
     const idx     = modulos.findIndex(m => m.id === modulo_id);
     const prev    = idx > 0 ? modulos[idx - 1] : null;
     const next    = idx < modulos.length - 1 ? modulos[idx + 1] : null;
@@ -296,28 +310,29 @@ const ModuloEstudiante = {
       </div>`;
   },
 
-  marcarCompletado(modulo_id, usuario_id, curso_id) {
-    const existente = DB.progreso_modulos.find(p => p.modulo_id === modulo_id && p.usuario_id === usuario_id);
-    if (existente) { existente.completado = true; }
-    else { DB.progreso_modulos.push({ id: DB.progreso_modulos.length + 1, modulo_id, usuario_id, completado: true, fecha: new Date().toISOString().split("T")[0] }); }
-    ENotif("Modulo marcado como completado.");
-    const btn = document.getElementById("btn-completar");
-    if (btn) { btn.textContent = "Modulo completado"; btn.disabled = true; btn.className = "btn btn-ghost btn-sm"; }
+  async marcarCompletado(modulo_id) {
+    try {
+      await API.marcarCompletado(modulo_id);
+      ENotif("Modulo marcado como completado.");
+      const btn = document.getElementById("btn-completar");
+      if (btn) { btn.textContent = "Modulo completado"; btn.disabled = true; btn.className = "btn btn-ghost btn-sm"; }
+    } catch (e) { ENotif(e.message, "danger"); }
   }
 };
 
 /* ── TAREA (vista estudiante) ────────────────────────────── */
 const TareaEstudiante = {
-  init() {
+  async init() {
     const u = initEstudiantePage("Tarea");
     if (!u) return;
     const tarea_id = parseInt(getParams().get("tarea_id"));
     const curso_id = parseInt(getParams().get("curso_id"));
-    const tarea    = DB.tareas.find(t => t.id === tarea_id);
-    if (!tarea) { window.location.href = `curso.html?id=${curso_id}`; return; }
+    let tarea;
+    try { tarea = await API.tareaDetalle(tarea_id); }
+    catch { window.location.href = `curso.html?id=${curso_id}`; return; }
 
     document.getElementById("tarea-titulo").textContent     = tarea.titulo;
-    document.getElementById("tarea-descripcion").innerHTML  = tarea.descripcion.replace(/\n/g, "<br>");
+    document.getElementById("tarea-descripcion").innerHTML  = (tarea.descripcion || "").replace(/\n/g, "<br>");
     document.getElementById("tarea-limite").textContent     = formatFechaHora(tarea.fecha_limite);
     document.getElementById("tarea-puntaje").textContent    = `${tarea.puntaje_maximo} pts`;
     document.getElementById("btn-volver").href              = `curso.html?id=${curso_id}`;
@@ -327,14 +342,14 @@ const TareaEstudiante = {
       if (crit) { crit.textContent = tarea.criterios; crit.closest(".card").style.display = ""; }
     }
 
-    const entrega = DB.getEntregaByTareaYUsuario(tarea_id, u.id);
+    const entrega = await API.miEntrega(tarea_id).catch(() => ({ estado: "pendiente" }));
     const vencida = eVencida(tarea.fecha_limite);
 
     if (entrega && entrega.estado === "entregado") {
       this.mostrarEntregaHecha(entrega, tarea);
     } else if (vencida) {
       const f = document.getElementById("form-entrega");
-      if (f) f.innerHTML = `<div class="alert" style="border:1px solid #FCA5A5;background:#FEF2F2;color:#991B1B;border-radius:10px;padding:14px 18px;display:flex;gap:8px">
+      if (f) f.innerHTML = `<div class="alert alert-danger" style="display:flex;gap:8px">
         <i class="bi-exclamation-circle"></i><span>La fecha limite ha vencido. No se pueden recibir mas entregas.</span></div>`;
     }
   },
@@ -342,22 +357,22 @@ const TareaEstudiante = {
   mostrarEntregaHecha(entrega, tarea) {
     const f = document.getElementById("form-entrega");
     if (!f) return;
-    const notaHtml = entrega.nota !== null
+    const nota = num(entrega.nota);
+    const notaHtml = nota !== null
       ? `<div class="kpi-card" style="max-width:200px">
-          <div class="kpi-icon ${entrega.nota >= DB.config.porcentaje_minimo_aprobacion ? "success" : "warning"}"><i class="bi-award"></i></div>
+          <div class="kpi-icon ${nota >= minimoAprobacion() ? "success" : "warning"}"><i class="bi-award"></i></div>
           <div class="kpi-info"><div class="kpi-value">${entrega.nota} / ${tarea.puntaje_maximo}</div><div class="kpi-label">Calificacion</div></div>
          </div>`
       : `<div class="alert alert-info" style="margin-bottom:0"><i class="bi-hourglass-split"></i><span>Pendiente de calificacion.</span></div>`;
     f.innerHTML = `
-      <div class="alert" style="background:#ECFDF5;border:1px solid #6EE7B7;color:#065F46;border-radius:10px;padding:14px 18px;display:flex;gap:8px;margin-bottom:16px">
+      <div class="alert alert-success" style="display:flex;gap:8px;margin-bottom:16px">
         <i class="bi-check-circle-fill"></i><span>Tarea entregada el ${formatFechaHora(entrega.fecha)}.</span>
       </div>
       ${notaHtml}
       ${entrega.comentario ? `<div class="alert alert-info" style="margin-top:12px"><i class="bi-chat-left-text"></i><span><strong>Retroalimentacion:</strong> ${entrega.comentario}</span></div>` : ""}`;
   },
 
-  entregar() {
-    const u        = Auth.getUsuarioActivo();
+  async entregar() {
     const tarea_id = parseInt(getParams().get("tarea_id"));
     const curso_id = parseInt(getParams().get("curso_id"));
     const tipo     = document.getElementById("tipo-entrega").value;
@@ -369,21 +384,16 @@ const TareaEstudiante = {
 
     if (!valor) { ENotif("Completa el campo de entrega.", "danger"); return; }
 
-    const entrega = DB.getEntregaByTareaYUsuario(tarea_id, u.id);
     const payload = {
-      id: DB.entregas.length + 1,
-      tarea_id, usuario_id: u.id,
-      estado: "entregado",
-      fecha:  new Date().toISOString(),
-      nota:   null, comentario: null,
       texto:  tipo === "texto"   ? valor : null,
       archivo:tipo === "archivo" ? valor : null,
       link:   tipo === "link"    ? valor : null,
     };
-    if (entrega) { Object.assign(entrega, payload); }
-    else { DB.entregas.push(payload); }
-    ENotif("Tarea entregada correctamente.");
-    setTimeout(() => { window.location.href = `curso.html?id=${curso_id}`; }, 1000);
+    try {
+      await API.entregar(tarea_id, payload);
+      ENotif("Tarea entregada correctamente.");
+      setTimeout(() => { window.location.href = `curso.html?id=${curso_id}`; }, 1000);
+    } catch (e) { ENotif(e.message, "danger"); }
   },
 
   cambiarTipo(tipo) {
@@ -397,33 +407,36 @@ const TareaEstudiante = {
 /* ── QUIZ (vista estudiante) ─────────────────────────────── */
 const QuizEstudiante = {
   quiz: null,
-  inicio: null,
   timer: null,
 
-  init() {
+  async init() {
     const u = initEstudiantePage("Quiz");
     if (!u) return;
     const quiz_id  = parseInt(getParams().get("quiz_id"));
     const curso_id = parseInt(getParams().get("curso_id"));
-    const quiz     = DB.quizzes.find(q => q.id === quiz_id);
+    let quiz, misRespuestas;
+    try {
+      [quiz, misRespuestas] = await Promise.all([
+        API.quizDetalle(quiz_id),
+        API.respuestasQuiz(quiz_id).catch(() => [])
+      ]);
+    } catch { window.location.href = `curso.html?id=${curso_id}`; return; }
     if (!quiz) { window.location.href = `curso.html?id=${curso_id}`; return; }
 
     this.quiz = quiz;
+    const preguntas = quiz.preguntas || [];
     document.getElementById("quiz-titulo").textContent     = quiz.titulo;
     document.getElementById("quiz-descripcion").textContent= quiz.descripcion || "";
-    document.getElementById("quiz-preguntas").textContent  = `${quiz.preguntas.length} preguntas`;
+    document.getElementById("quiz-preguntas").textContent  = `${preguntas.length} preguntas`;
     document.getElementById("btn-volver").href             = `curso.html?id=${curso_id}`;
 
-    const yaRespondido = DB.respuestas_quiz.find(r => r.usuario_id === u.id && r.quiz_id === quiz_id);
+    const yaRespondido = misRespuestas && misRespuestas.length ? misRespuestas[0] : null;
     const vencido      = eVencida(quiz.fecha_limite);
 
-    if (yaRespondido) {
-      this.mostrarResultado(yaRespondido, quiz);
-      return;
-    }
+    if (yaRespondido) { this.mostrarResultado(yaRespondido, quiz); return; }
     if (vencido) {
       const f = document.getElementById("form-quiz");
-      if (f) f.innerHTML = `<div class="alert" style="border:1px solid #FCA5A5;background:#FEF2F2;color:#991B1B;border-radius:10px;padding:14px 18px;display:flex;gap:8px">
+      if (f) f.innerHTML = `<div class="alert alert-danger" style="display:flex;gap:8px">
         <i class="bi-exclamation-circle"></i><span>Este quiz ha vencido y ya no acepta respuestas.</span></div>`;
       return;
     }
@@ -450,12 +463,13 @@ const QuizEstudiante = {
 
   renderPreguntas(quiz) {
     const el = document.getElementById("preguntas-quiz");
-    if (!el || !quiz.preguntas.length) return;
-    el.innerHTML = quiz.preguntas.map((p, i) => `
+    const preguntas = quiz.preguntas || [];
+    if (!el || !preguntas.length) return;
+    el.innerHTML = preguntas.map((p, i) => `
       <div class="card" style="margin-bottom:16px" id="pregunta-${p.id}">
         <div class="card-header">
-          <span class="text-sm fw-semibold text-muted">Pregunta ${i + 1} de ${quiz.preguntas.length}</span>
-          <span class="badge badge-neutral">${p.puntaje} pt${p.puntaje !== 1 ? "s" : ""}</span>
+          <span class="text-sm fw-semibold text-muted">Pregunta ${i + 1} de ${preguntas.length}</span>
+          <span class="badge badge-neutral">${p.puntaje} pt${num(p.puntaje) !== 1 ? "s" : ""}</span>
         </div>
         <div class="card-body">
           <p class="fw-semibold" style="margin:0 0 16px">${p.enunciado}</p>
@@ -465,23 +479,24 @@ const QuizEstudiante = {
   },
 
   renderInputRespuesta(p, i) {
+    const opciones = p.opciones || [];
     switch (p.tipo) {
       case "opcion_multiple_una":
-        return p.opciones.map((o, j) => `
+        return opciones.map((o, j) => `
           <label style="display:flex;align-items:center;gap:8px;padding:10px 12px;border:1px solid var(--color-border);border-radius:8px;margin-bottom:6px;cursor:pointer">
             <input type="radio" name="resp-${p.id}" value="${j}" class="preg-resp" data-id="${p.id}">
             <span class="text-sm">${o}</span>
           </label>`).join("");
 
       case "opcion_multiple_varias":
-        return p.opciones.map((o, j) => `
+        return opciones.map((o, j) => `
           <label style="display:flex;align-items:center;gap:8px;padding:10px 12px;border:1px solid var(--color-border);border-radius:8px;margin-bottom:6px;cursor:pointer">
             <input type="checkbox" name="resp-${p.id}" value="${j}" class="preg-resp" data-id="${p.id}">
             <span class="text-sm">${o}</span>
           </label>`).join("");
 
       case "verdadero_falso":
-        return ["Verdadero","Falso"].map((v, j) => `
+        return ["Verdadero","Falso"].map(v => `
           <label style="display:flex;align-items:center;gap:8px;padding:10px 12px;border:1px solid var(--color-border);border-radius:8px;margin-bottom:6px;cursor:pointer">
             <input type="radio" name="resp-${p.id}" value="${v}" class="preg-resp" data-id="${p.id}">
             <span class="text-sm">${v}</span>
@@ -524,46 +539,40 @@ const QuizEstudiante = {
     }
   },
 
-  enviar(automatico = false) {
+  async enviar(automatico = false) {
     if (!this.quiz) return;
     if (this.timer) clearInterval(this.timer);
-    const u = Auth.getUsuarioActivo();
     const respuestas = {};
-    let nota = 0;
 
-    this.quiz.preguntas.forEach(p => {
+    (this.quiz.preguntas || []).forEach(p => {
       if (p.tipo === "opcion_multiple_una") {
         const sel = document.querySelector(`input[name="resp-${p.id}"]:checked`);
-        respuestas[p.id] = sel ? parseInt(sel.value) : null;
-        if (sel && parseInt(sel.value) === p.respuesta_correcta) nota += p.puntaje;
+        respuestas[p.id] = sel ? sel.value : null;
       } else if (p.tipo === "verdadero_falso") {
         const sel = document.querySelector(`input[name="resp-${p.id}"]:checked`);
         respuestas[p.id] = sel ? sel.value : null;
-        if (sel && (sel.value === "Verdadero") === p.respuesta_correcta) nota += p.puntaje;
-      } else if (p.tipo === "opcion_multiple_varias") {
+      } else if (p.tipo === "opcion_multiple_varias" || p.tipo === "escala_valoracion") {
         const sels = Array.from(document.querySelectorAll(`input[name="resp-${p.id}"]:checked`)).map(i => i.value);
         respuestas[p.id] = sels;
       } else {
         const inp = document.querySelector(`.preg-resp[data-id="${p.id}"]`);
         respuestas[p.id] = inp ? inp.value : null;
-        if (inp && inp.value && inp.value.trim().toLowerCase() === String(p.respuesta_correcta).toLowerCase()) nota += p.puntaje;
       }
     });
 
-    DB.respuestas_quiz.push({
-      id: DB.respuestas_quiz.length + 1,
-      quiz_id: this.quiz.id, usuario_id: u.id,
-      respuestas, nota_automatica: nota, nota_manual: null,
-      fecha: new Date().toISOString()
-    });
-    if (!automatico) ENotif("Quiz enviado correctamente.");
-    setTimeout(() => { window.location.reload(); }, 800);
+    try {
+      await API.enviarQuiz(this.quiz.id, respuestas);
+      if (!automatico) ENotif("Quiz enviado correctamente.");
+      setTimeout(() => { window.location.reload(); }, 800);
+    } catch (e) { ENotif(e.message, "danger"); }
   },
 
   mostrarResultado(resultado, quiz) {
-    const total    = quiz.preguntas.reduce((a, p) => a + p.puntaje, 0);
-    const pct      = total > 0 ? Math.round((resultado.nota_automatica / total) * 100) : 0;
-    const aprobado = pct >= DB.config.porcentaje_minimo_aprobacion;
+    const total    = (quiz.preguntas || []).reduce((a, p) => a + num(p.puntaje), 0);
+    const notaAuto = num(resultado.nota_automatica) || 0;
+    const pct      = total > 0 ? Math.round((notaAuto / total) * 100) : 0;
+    const aprobado = pct >= minimoAprobacion();
+    const notaManual = num(resultado.nota_manual);
     const f        = document.getElementById("form-quiz");
     if (!f) return;
     f.innerHTML = `
@@ -576,11 +585,11 @@ const QuizEstudiante = {
           <p class="text-muted text-sm" style="margin:0 0 20px">Enviado el ${formatFechaHora(resultado.fecha)}</p>
           <div class="kpi-grid" style="max-width:400px;margin:0 auto">
             <div class="kpi-card"><div class="kpi-icon ${aprobado ? "success" : "warning"}"><i class="bi-award"></i></div>
-              <div class="kpi-info"><div class="kpi-value">${resultado.nota_automatica} / ${total}</div><div class="kpi-label">Puntos</div></div></div>
+              <div class="kpi-info"><div class="kpi-value">${notaAuto} / ${total}</div><div class="kpi-label">Puntos</div></div></div>
             <div class="kpi-card"><div class="kpi-icon primary"><i class="bi-percent"></i></div>
               <div class="kpi-info"><div class="kpi-value">${pct}%</div><div class="kpi-label">Porcentaje</div></div></div>
           </div>
-          ${resultado.nota_manual !== null ? `<div class="alert alert-info" style="margin-top:16px"><i class="bi-award"></i><span>Nota manual asignada por el profesor: <strong>${resultado.nota_manual} pts</strong></span></div>` : ""}
+          ${notaManual !== null ? `<div class="alert alert-info" style="margin-top:16px"><i class="bi-award"></i><span>Nota manual asignada por el profesor: <strong>${resultado.nota_manual} pts</strong></span></div>` : ""}
         </div>
       </div>`;
   }
@@ -588,121 +597,125 @@ const QuizEstudiante = {
 
 /* ── CALIFICACIONES ──────────────────────────────────────── */
 const CalificacionesEstudiante = {
-  init() {
+  async init() {
     const u = initEstudiantePage("Calificaciones");
     if (!u) return;
-    const cursos = DB.getCursosByEstudiante(u.id);
     const el = document.getElementById("lista-calificaciones");
     if (!el) return;
+    let cursos;
+    try { cursos = (await API.cursos()).filter(c => c.mi_rol === "ESTUDIANTE"); }
+    catch (e) { ENotif(e.message, "danger"); return; }
 
     if (!cursos.length) {
       el.innerHTML = `<div class="empty-state"><i class="bi-clipboard-data"></i><p>No estas inscrito en ningun curso.</p></div>`;
       return;
     }
 
-    el.innerHTML = cursos.map(c => {
-      const tareas  = DB.getTareasByCurso(c.id);
-      const quizzes = DB.getQuizzesByCurso(c.id);
-      const formula = c.formula || [];
+    const bloques = await Promise.all(cursos.map(c => this.renderCurso(c)));
+    el.innerHTML = bloques.join("");
+  },
 
-      const tareaRows = tareas.map(t => {
-        const e = DB.getEntregaByTareaYUsuario(t.id, u.id);
-        const nota = e && e.nota !== null ? e.nota : null;
-        return { titulo: t.titulo, nota, max: t.puntaje_maximo, tipo: "Tarea" };
-      });
-      const quizRows = quizzes.map(q => {
-        const r = DB.respuestas_quiz.find(r => r.usuario_id === u.id && r.quiz_id === q.id);
-        const max = q.preguntas.reduce((a, p) => a + p.puntaje, 0);
-        return { titulo: q.titulo, nota: r ? r.nota_automatica : null, max, tipo: "Quiz" };
-      });
-      const items = [...tareaRows, ...quizRows];
+  async renderCurso(c) {
+    const minimo = minimoAprobacion();
+    const [tareas, quizzes, prog] = await Promise.all([
+      API.tareas(c.id).catch(() => []),
+      API.quizzes(c.id).catch(() => []),
+      API.progresoCurso(c.id).catch(() => ({ porcentaje: 0 }))
+    ]);
+    const [entregas, resps] = await Promise.all([
+      Promise.all(tareas.map(t => API.miEntrega(t.id).catch(() => ({})))),
+      Promise.all(quizzes.map(q => API.respuestasQuiz(q.id).catch(() => [])))
+    ]);
 
-      const pct = DB.getProgresoCurso(u.id, c.id);
+    const tareaRows = tareas.map((t, i) => ({
+      titulo: t.titulo, nota: num(entregas[i].nota), max: num(t.puntaje_maximo), tipo: "Tarea"
+    }));
+    const quizRows = quizzes.map((q, i) => ({
+      titulo: q.titulo, nota: resps[i].length ? num(resps[i][0].nota_automatica) : null,
+      max: num(q.puntaje_total), tipo: "Quiz"
+    }));
+    const items = [...tareaRows, ...quizRows];
+    const formula = c.formula || [];
+    const pct = prog.porcentaje;
 
-      return `
-        <div class="card" style="margin-bottom:20px">
-          <div class="card-header">
-            <div>
-              <h4 style="margin:0">${c.nombre}</h4>
-              <span class="text-xs text-muted">${c.codigo}</span>
-            </div>
-            <div style="display:flex;align-items:center;gap:8px">
-              <div class="progress-bar" style="width:80px"><div class="progress-fill" style="width:${pct}%"></div></div>
-              <span class="text-xs text-muted">${pct}%</span>
-            </div>
+    return `
+      <div class="card" style="margin-bottom:20px">
+        <div class="card-header">
+          <div>
+            <h4 style="margin:0">${c.nombre}</h4>
+            <span class="text-xs text-muted">${c.codigo}</span>
           </div>
-          <div class="card-body" style="padding:0">
-            <div class="table-container" style="border:none;box-shadow:none;border-radius:0">
-              <table class="table">
-                <thead><tr><th>Actividad</th><th>Tipo</th><th>Nota</th><th>Maximo</th><th>Estado</th></tr></thead>
-                <tbody>
-                  ${items.length
-                    ? items.map(item => {
-                        const pctItem = item.nota !== null ? Math.round((item.nota / item.max) * 100) : null;
-                        const ok      = pctItem !== null && pctItem >= DB.config.porcentaje_minimo_aprobacion;
-                        return `
-                          <tr>
-                            <td class="fw-semibold text-sm">${item.titulo}</td>
-                            <td><span class="badge badge-${item.tipo === "Tarea" ? "primary" : "secondary"}">${item.tipo}</span></td>
-                            <td class="fw-semibold text-sm ${item.nota !== null ? (ok ? "text-success" : "text-danger") : "text-muted"}">${item.nota !== null ? item.nota : "—"}</td>
-                            <td class="text-sm text-muted">${item.max}</td>
-                            <td>${item.nota !== null ? `<span class="badge badge-${ok ? "success" : "danger"}">${ok ? "Aprobado" : "Reprobado"}</span>` : `<span class="badge badge-neutral">Pendiente</span>`}</td>
-                          </tr>`;
-                      }).join("")
-                    : `<tr><td colspan="5" class="text-center text-muted text-sm" style="padding:20px">Sin actividades calificadas aun.</td></tr>`}
-                </tbody>
-              </table>
-            </div>
-            ${formula.length
-              ? `<div style="padding:12px 16px;border-top:1px solid var(--color-border);background:#F9FAFB">
-                  <p class="text-xs text-muted fw-semibold" style="margin:0 0 6px;text-transform:uppercase;letter-spacing:.05em">Formula de calificacion</p>
-                  <div style="display:flex;gap:16px;flex-wrap:wrap">
-                    ${formula.map(f => `<span class="text-xs"><span class="fw-semibold">${f.componente}</span> ${f.porcentaje}%</span>`).join("")}
-                  </div>
-                </div>`
-              : ""}
+          <div style="display:flex;align-items:center;gap:8px">
+            <div class="progress-bar" style="width:80px"><div class="progress-fill" style="width:${pct}%"></div></div>
+            <span class="text-xs text-muted">${pct}%</span>
           </div>
-        </div>`;
-    }).join("");
+        </div>
+        <div class="card-body" style="padding:0">
+          <div class="table-container" style="border:none;box-shadow:none;border-radius:0">
+            <table class="table">
+              <thead><tr><th>Actividad</th><th>Tipo</th><th>Nota</th><th>Maximo</th><th>Estado</th></tr></thead>
+              <tbody>
+                ${items.length
+                  ? items.map(item => {
+                      const pctItem = item.nota !== null && item.max ? Math.round((item.nota / item.max) * 100) : null;
+                      const ok      = pctItem !== null && pctItem >= minimo;
+                      return `
+                        <tr>
+                          <td class="fw-semibold text-sm">${item.titulo}</td>
+                          <td><span class="badge badge-${item.tipo === "Tarea" ? "primary" : "secondary"}">${item.tipo}</span></td>
+                          <td class="fw-semibold text-sm ${item.nota !== null ? (ok ? "text-success" : "text-danger") : "text-muted"}">${item.nota !== null ? item.nota : "—"}</td>
+                          <td class="text-sm text-muted">${item.max ?? "—"}</td>
+                          <td>${item.nota !== null ? `<span class="badge badge-${ok ? "success" : "danger"}">${ok ? "Aprobado" : "Reprobado"}</span>` : `<span class="badge badge-neutral">Pendiente</span>`}</td>
+                        </tr>`;
+                    }).join("")
+                  : `<tr><td colspan="5" class="text-center text-muted text-sm" style="padding:20px">Sin actividades calificadas aun.</td></tr>`}
+              </tbody>
+            </table>
+          </div>
+          ${formula.length
+            ? `<div style="padding:12px 16px;border-top:1px solid var(--color-border);background:#F9FAFB">
+                <p class="text-xs text-muted fw-semibold" style="margin:0 0 6px;text-transform:uppercase;letter-spacing:.05em">Formula de calificacion</p>
+                <div style="display:flex;gap:16px;flex-wrap:wrap">
+                  ${formula.map(f => `<span class="text-xs"><span class="fw-semibold">${f.componente}</span> ${f.porcentaje}%</span>`).join("")}
+                </div>
+              </div>`
+            : ""}
+        </div>
+      </div>`;
   }
 };
 
 /* ── PROGRESO ────────────────────────────────────────────── */
 const ProgresoEstudiante = {
-  init() {
+  async init() {
     const u = initEstudiantePage("Mi Progreso");
     if (!u) return;
-    const cursos = DB.getCursosByEstudiante(u.id).filter(c => c.estado === "activo");
-    const el     = document.getElementById("lista-progreso");
+    const el = document.getElementById("lista-progreso");
     if (!el) return;
+    let cursos;
+    try { cursos = (await API.cursos()).filter(c => c.mi_rol === "ESTUDIANTE" && c.estado === "activo"); }
+    catch (e) { ENotif(e.message, "danger"); return; }
 
     if (!cursos.length) {
       el.innerHTML = `<div class="empty-state"><i class="bi-graph-up"></i><p>No tienes cursos activos.</p></div>`;
       return;
     }
 
-    // KPI global
-    const totalMods  = cursos.reduce((a, c) => a + DB.getModulosByCurso(c.id).length, 0);
-    const compMods   = cursos.reduce((a, c) =>
-      a + DB.getModulosByCurso(c.id).filter(m => DB.progreso_modulos.some(p => p.modulo_id === m.id && p.usuario_id === u.id && p.completado)).length, 0);
-    const kpiPct     = totalMods > 0 ? Math.round((compMods / totalMods) * 100) : 0;
+    const datos = await Promise.all(cursos.map(c => this.datosCurso(c)));
 
-    const kpiMods  = document.getElementById("kpi-modulos");
+    const totalMods = datos.reduce((a, d) => a + d.prog.total, 0);
+    const compMods  = datos.reduce((a, d) => a + d.prog.completados, 0);
+    const kpiPct    = totalMods > 0 ? Math.round((compMods / totalMods) * 100) : 0;
+
+    const kpiMods   = document.getElementById("kpi-modulos");
     const kpiCursos = document.getElementById("kpi-cursos-activos");
     const kpiGlobal = document.getElementById("kpi-global");
-    if (kpiMods)    kpiMods.textContent    = `${compMods} / ${totalMods}`;
-    if (kpiCursos)  kpiCursos.textContent  = cursos.length;
-    if (kpiGlobal)  kpiGlobal.textContent  = `${kpiPct}%`;
+    if (kpiMods)   kpiMods.textContent   = `${compMods} / ${totalMods}`;
+    if (kpiCursos) kpiCursos.textContent = cursos.length;
+    if (kpiGlobal) kpiGlobal.textContent = `${kpiPct}%`;
 
-    el.innerHTML = cursos.map(c => {
-      const modulos    = DB.getModulosByCurso(c.id);
-      const completados= modulos.filter(m => DB.progreso_modulos.some(p => p.modulo_id === m.id && p.usuario_id === u.id && p.completado));
-      const pct        = DB.getProgresoCurso(u.id, c.id);
-      const tareas     = DB.getTareasByCurso(c.id);
-      const entregadas = tareas.filter(t => { const e = DB.getEntregaByTareaYUsuario(t.id, u.id); return e && e.estado === "entregado"; }).length;
-      const quizzes    = DB.getQuizzesByCurso(c.id);
-      const respondidos= quizzes.filter(q => DB.respuestas_quiz.find(r => r.usuario_id === u.id && r.quiz_id === q.id)).length;
-
+    el.innerHTML = datos.map(d => {
+      const c = d.curso, pct = d.prog.porcentaje;
       return `
         <div class="card" style="margin-bottom:20px">
           <div class="card-header">
@@ -721,20 +734,39 @@ const ProgresoEstudiante = {
             </div>
             <div class="kpi-grid">
               <div class="kpi-card">
-                <div class="kpi-icon ${completados.length === modulos.length ? "success" : "secondary"}"><i class="bi-collection"></i></div>
-                <div class="kpi-info"><div class="kpi-value">${completados.length} / ${modulos.length}</div><div class="kpi-label">Modulos completados</div></div>
+                <div class="kpi-icon ${d.prog.completados === d.prog.total && d.prog.total > 0 ? "success" : "secondary"}"><i class="bi-collection"></i></div>
+                <div class="kpi-info"><div class="kpi-value">${d.prog.completados} / ${d.prog.total}</div><div class="kpi-label">Modulos completados</div></div>
               </div>
               <div class="kpi-card">
-                <div class="kpi-icon ${entregadas === tareas.length ? "success" : "warning"}"><i class="bi-file-check"></i></div>
-                <div class="kpi-info"><div class="kpi-value">${entregadas} / ${tareas.length}</div><div class="kpi-label">Tareas entregadas</div></div>
+                <div class="kpi-icon ${d.entregadas === d.totalTareas && d.totalTareas > 0 ? "success" : "warning"}"><i class="bi-file-check"></i></div>
+                <div class="kpi-info"><div class="kpi-value">${d.entregadas} / ${d.totalTareas}</div><div class="kpi-label">Tareas entregadas</div></div>
               </div>
               <div class="kpi-card">
-                <div class="kpi-icon ${respondidos === quizzes.length ? "success" : "warning"}"><i class="bi-patch-check"></i></div>
-                <div class="kpi-info"><div class="kpi-value">${respondidos} / ${quizzes.length}</div><div class="kpi-label">Quizzes respondidos</div></div>
+                <div class="kpi-icon ${d.respondidos === d.totalQuizzes && d.totalQuizzes > 0 ? "success" : "warning"}"><i class="bi-patch-check"></i></div>
+                <div class="kpi-info"><div class="kpi-value">${d.respondidos} / ${d.totalQuizzes}</div><div class="kpi-label">Quizzes respondidos</div></div>
               </div>
             </div>
           </div>
         </div>`;
     }).join("");
+  },
+
+  async datosCurso(c) {
+    const [prog, tareas, quizzes] = await Promise.all([
+      API.progresoCurso(c.id).catch(() => ({ total: 0, completados: 0, porcentaje: 0 })),
+      API.tareas(c.id).catch(() => []),
+      API.quizzes(c.id).catch(() => [])
+    ]);
+    const [entregas, resps] = await Promise.all([
+      Promise.all(tareas.map(t => API.miEntrega(t.id).catch(() => ({ estado: "pendiente" })))),
+      Promise.all(quizzes.map(q => API.respuestasQuiz(q.id).catch(() => [])))
+    ]);
+    return {
+      curso: c, prog,
+      totalTareas: tareas.length,
+      entregadas: entregas.filter(e => e.estado === "entregado").length,
+      totalQuizzes: quizzes.length,
+      respondidos: resps.filter(r => r.length > 0).length,
+    };
   }
 };

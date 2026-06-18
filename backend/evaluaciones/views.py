@@ -10,6 +10,15 @@ from .serializers import (
 )
 
 
+def es_profesor_de(curso, user):
+    """True si el usuario administra el curso o esta inscrito como PROFESOR.
+    Profesores y estudiantes comparten rol='USER', asi que el rol del sistema
+    no basta: se distingue por la inscripcion en el curso."""
+    if user.rol in ('ADMIN', 'SUPERADMIN'):
+        return True
+    return curso.inscripciones.filter(usuario=user, rol_en_curso='PROFESOR').exists()
+
+
 # ── TAREAS ────────────────────────────────────────────────────
 class TareaListCreate(generics.ListCreateAPIView):
     serializer_class   = TareaSerializer
@@ -94,9 +103,13 @@ class QuizDetail(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_serializer_class(self):
-        if self.request.method == 'GET' and self.request.user.rol == 'USER':
-            return QuizDetalleEstudianteSerializer
-        return QuizDetalleSerializer
+        if self.request.method != 'GET':
+            return QuizDetalleSerializer
+        # En GET, el estudiante no debe ver las respuestas correctas; el profesor si.
+        quiz = self.get_object()
+        if es_profesor_de(quiz.curso, self.request.user):
+            return QuizDetalleSerializer
+        return QuizDetalleEstudianteSerializer
 
 
 # ── RESPUESTAS QUIZ ───────────────────────────────────────────
@@ -106,10 +119,10 @@ def respuestas_quiz(request, quiz_pk):
 
     if request.method == 'GET':
         # Profesor ve todas; estudiante solo la suya
-        if request.user.rol == 'USER':
-            qs = RespuestaQuiz.objects.filter(quiz=quiz, usuario=request.user)
-        else:
+        if es_profesor_de(quiz.curso, request.user):
             qs = RespuestaQuiz.objects.filter(quiz=quiz).select_related('usuario')
+        else:
+            qs = RespuestaQuiz.objects.filter(quiz=quiz, usuario=request.user)
         return Response(RespuestaQuizSerializer(qs, many=True).data)
 
     # POST: enviar respuestas

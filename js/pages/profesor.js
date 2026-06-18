@@ -18,6 +18,11 @@ function formatFecha(f) {
   return new Date(f).toLocaleDateString("es-EC", { day:"2-digit", month:"short", year:"numeric" });
 }
 
+function inicialesDe(nombre) {
+  const parts = (nombre || "").trim().split(/\s+/);
+  return (((parts[0] || "")[0] || "") + ((parts[1] || "")[0] || "")).toUpperCase() || "?";
+}
+
 function badgeCurso(estado) {
   return estado === "activo"
     ? `<span class="badge badge-success">Activo</span>`
@@ -47,38 +52,38 @@ function Notif(mensaje, tipo = "success") {
 
 /* ── MIS CURSOS ──────────────────────────────────────────── */
 const MisCursosProfesor = {
-  init() {
+  async init() {
     const u = initProfesorPage("Mis Cursos");
     if (!u) return;
-    const cursos   = DB.getCursosByProfesor(u.id);
-    const activos  = cursos.filter(c => c.estado === "activo");
-    const archivados = cursos.filter(c => c.estado === "archivado");
-    this.renderGrid("grid-activos", activos, u.id);
-    this.renderGrid("grid-archivados", archivados, u.id);
-    const secArch = document.getElementById("sec-archivados");
-    if (secArch) secArch.style.display = archivados.length ? "block" : "none";
+    try {
+      const todos  = await API.cursos();
+      const cursos = todos.filter(c => c.mi_rol === "PROFESOR");
+      const activos    = cursos.filter(c => c.estado === "activo");
+      const archivados = cursos.filter(c => c.estado === "archivado");
+      this.renderGrid("grid-activos", activos);
+      this.renderGrid("grid-archivados", archivados);
+      const secArch = document.getElementById("sec-archivados");
+      if (secArch) secArch.style.display = archivados.length ? "block" : "none";
+    } catch (e) { Notif(e.message, "danger"); }
   },
 
-  renderGrid(containerId, cursos, profesorId) {
+  renderGrid(containerId, cursos) {
     const el = document.getElementById(containerId);
     if (!el) return;
     if (!cursos.length) {
       el.innerHTML = `<div class="empty-state"><i class="bi-book"></i><p>No hay cursos aqui.</p></div>`;
       return;
     }
-    el.innerHTML = cursos.map(c => {
-      const fac   = DB.getFacultadById(c.facultad_id);
-      const count = DB.getEstudiantesByCurso(c.id).length;
-      return `
+    el.innerHTML = cursos.map(c => `
         <div class="course-card">
           <div class="course-card-header">
             <h4>${c.nombre}</h4>
-            <span>${fac ? fac.codigo : "—"} &bull; ${c.codigo}</span>
+            <span>${c.facultad_codigo || "—"} &bull; ${c.codigo}</span>
           </div>
           <div class="course-card-body">
             <p class="text-sm" style="margin:0 0 12px;-webkit-line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden">${c.descripcion}</p>
             <div style="display:flex;gap:12px;font-size:.75rem;color:var(--color-text-muted)">
-              <span><i class="bi-people"></i> ${count} estudiantes</span>
+              <span><i class="bi-people"></i> ${c.total_estudiantes} estudiantes</span>
               <span><i class="bi-calendar"></i> ${formatFecha(c.fecha_fin)}</span>
             </div>
           </div>
@@ -88,8 +93,7 @@ const MisCursosProfesor = {
               Gestionar <i class="bi-arrow-right"></i>
             </a>
           </div>
-        </div>`;
-    }).join("");
+        </div>`).join("");
   }
 };
 
@@ -97,31 +101,35 @@ const MisCursosProfesor = {
 const CursoForm = {
   componenteIndex: 0,
 
-  init() {
+  async init() {
     const u = initProfesorPage("Curso");
     if (!u) return;
     const id = parseInt(getParams().get("id")) || null;
 
     /* Poblar select de facultades */
-    const selFac = document.getElementById("c-facultad");
-    if (selFac) {
-      selFac.innerHTML = `<option value="">Seleccionar...</option>` +
-        DB.facultades.map(f => `<option value="${f.id}">${f.nombre}</option>`).join("");
-    }
+    try {
+      const facultades = await API.facultades();
+      const selFac = document.getElementById("c-facultad");
+      if (selFac) {
+        selFac.innerHTML = `<option value="">Seleccionar...</option>` +
+          facultades.map(f => `<option value="${f.id}">${f.nombre}</option>`).join("");
+      }
+    } catch (e) { Notif(e.message, "danger"); }
 
     if (id) {
       document.getElementById("form-titulo").textContent = "Editar Curso";
       const h2 = document.getElementById("form-titulo-h2");
       if (h2) h2.textContent = "Editar Curso";
-      const c = DB.getCursoById(id);
-      if (!c) return;
-      document.getElementById("c-nombre").value      = c.nombre;
-      document.getElementById("c-descripcion").value = c.descripcion;
-      document.getElementById("c-facultad").value    = c.facultad_id;
-      document.getElementById("c-inicio").value      = c.fecha_inicio;
-      document.getElementById("c-fin").value         = c.fecha_fin;
-      document.getElementById("c-codigo").value      = c.codigo;
-      c.formula.forEach(f => this.agregarComponente(f.componente, f.porcentaje));
+      try {
+        const c = await API.cursoDetalle(id);
+        document.getElementById("c-nombre").value      = c.nombre;
+        document.getElementById("c-descripcion").value = c.descripcion;
+        document.getElementById("c-facultad").value    = c.facultad;
+        document.getElementById("c-inicio").value      = c.fecha_inicio;
+        document.getElementById("c-fin").value         = c.fecha_fin;
+        document.getElementById("c-codigo").value      = c.codigo;
+        (c.formula || []).forEach(f => this.agregarComponente(f.componente, f.porcentaje));
+      } catch (e) { Notif(e.message, "danger"); }
     } else {
       document.getElementById("form-titulo").textContent = "Nuevo Curso";
       document.getElementById("c-codigo").value = "CURSO-" + Math.random().toString(36).slice(2,8).toUpperCase();
@@ -162,15 +170,15 @@ const CursoForm = {
     }
   },
 
-  guardar() {
+  async guardar() {
     const nombre      = document.getElementById("c-nombre").value.trim();
     const descripcion = document.getElementById("c-descripcion").value.trim();
-    const facultad_id = parseInt(document.getElementById("c-facultad").value);
+    const facultad    = parseInt(document.getElementById("c-facultad").value);
     const fecha_inicio= document.getElementById("c-inicio").value;
     const fecha_fin   = document.getElementById("c-fin").value;
     const codigo      = document.getElementById("c-codigo").value.trim();
 
-    if (!nombre || !descripcion || !facultad_id || !fecha_inicio || !fecha_fin) {
+    if (!nombre || !descripcion || !facultad || !fecha_inicio || !fecha_fin) {
       Notif("Completa todos los campos obligatorios.", "danger"); return;
     }
     if (new Date(fecha_fin) <= new Date(fecha_inicio)) {
@@ -179,25 +187,25 @@ const CursoForm = {
 
     const formula = Array.from(document.querySelectorAll("#formula-items > div")).map(div => ({
       componente: div.querySelector(".comp-nombre").value.trim(),
-      porcentaje: parseFloat(div.querySelector(".comp-pct").value) || 0
+      porcentaje: parseInt(div.querySelector(".comp-pct").value) || 0
     })).filter(f => f.componente);
 
     const total = formula.reduce((a, b) => a + b.porcentaje, 0);
     if (total !== 100) { Notif("Los porcentajes de la formula deben sumar 100%.", "danger"); return; }
 
     const id = parseInt(getParams().get("id")) || null;
-    const u  = Auth.getUsuarioActivo();
+    const payload = { nombre, codigo, descripcion, facultad, fecha_inicio, fecha_fin, formula };
 
-    if (id) {
-      const c = DB.getCursoById(id);
-      Object.assign(c, { nombre, descripcion, facultad_id, fecha_inicio, fecha_fin, formula });
-      Notif("Curso actualizado.");
-    } else {
-      DB.cursos.push({ id: DB.cursos.length + 1, nombre, descripcion, facultad_id,
-        fecha_inicio, fecha_fin, codigo, estado:"activo", profesor_id: u.id, formula });
-      Notif("Curso creado exitosamente.");
-    }
-    setTimeout(() => { window.location.href = "mis-cursos.html"; }, 900);
+    try {
+      if (id) {
+        await API.actualizarCurso(id, payload);
+        Notif("Curso actualizado.");
+      } else {
+        await API.crearCurso(payload);
+        Notif("Curso creado exitosamente.");
+      }
+      setTimeout(() => { window.location.href = "mis-cursos.html"; }, 900);
+    } catch (e) { Notif(e.message, "danger"); }
   }
 };
 
@@ -206,11 +214,13 @@ const GestionCurso = {
   curso: null,
   tab: "modulos",
 
-  init() {
+  async init() {
     const u = initProfesorPage("Gestion del Curso");
     if (!u) return;
     const id = parseInt(getParams().get("id"));
-    this.curso = DB.getCursoById(id);
+    try {
+      this.curso = await API.cursoDetalle(id);
+    } catch { window.location.href = "mis-cursos.html"; return; }
     if (!this.curso) { window.location.href = "mis-cursos.html"; return; }
 
     document.getElementById("curso-nombre").textContent = this.curso.nombre;
@@ -234,16 +244,17 @@ const GestionCurso = {
     document.getElementById(`panel-${tab}`).style.display = "block";
   },
 
-  renderModulos() {
+  async renderModulos() {
     const el = document.getElementById("lista-modulos");
     if (!el) return;
-    const modulos = DB.getModulosByCurso(this.curso.id);
+    let modulos = [];
+    try { modulos = await API.modulos(this.curso.id); } catch (e) { Notif(e.message, "danger"); }
     if (!modulos.length) {
       el.innerHTML = `<div class="empty-state"><i class="bi-collection"></i><p>No hay modulos creados.</p></div>`;
       return;
     }
     el.innerHTML = modulos.map(m => {
-      const mats = DB.getMaterialesByModulo(m.id).length;
+      const mats = (m.materiales || []).length;
       return `
         <div class="module-item">
           <div class="module-num">${m.orden}</div>
@@ -260,28 +271,30 @@ const GestionCurso = {
     }).join("");
   },
 
-  renderTareas() {
+  async renderTareas() {
     const el = document.getElementById("lista-tareas");
     if (!el) return;
-    const tareas = DB.getTareasByCurso(this.curso.id);
+    let tareas = [];
+    try { tareas = await API.tareas(this.curso.id); } catch (e) { Notif(e.message, "danger"); }
     if (!tareas.length) {
       el.innerHTML = `<div class="empty-state"><i class="bi-file-text"></i><p>No hay tareas creadas.</p></div>`;
       return;
     }
+    const total = this.curso.total_estudiantes;
+    const entregasPorTarea = await Promise.all(tareas.map(t => API.entregas(t.id).catch(() => [])));
     el.innerHTML = `
       <div class="table-container">
         <table class="table">
           <thead><tr><th>Titulo</th><th>Fecha limite</th><th>Puntaje</th><th>Entregas</th><th>Acciones</th></tr></thead>
           <tbody>
-            ${tareas.map(t => {
-              const entregas = DB.getEntregasByTarea(t.id).filter(e => e.estado === "entregado").length;
-              const total    = DB.getEstudiantesByCurso(this.curso.id).length;
+            ${tareas.map((t, i) => {
+              const entregas = entregasPorTarea[i].filter(e => e.estado === "entregado").length;
               return `
                 <tr>
                   <td class="fw-semibold text-sm">${t.titulo}</td>
                   <td class="text-sm">${formatFecha(t.fecha_limite)}</td>
                   <td class="text-sm">${t.puntaje_maximo} pts</td>
-                  <td><span class="badge badge-${entregas === total ? "success" : "warning"}">${entregas}/${total}</span></td>
+                  <td><span class="badge badge-${entregas === total && total > 0 ? "success" : "warning"}">${entregas}/${total}</span></td>
                   <td>
                     <div class="table-actions">
                       <a href="tarea-entregas.html?tarea_id=${t.id}&curso_id=${this.curso.id}" class="btn btn-ghost btn-sm"><i class="bi-eye"></i></a>
@@ -295,10 +308,11 @@ const GestionCurso = {
       </div>`;
   },
 
-  renderQuizzes() {
+  async renderQuizzes() {
     const el = document.getElementById("lista-quizzes");
     if (!el) return;
-    const quizzes = DB.getQuizzesByCurso(this.curso.id);
+    let quizzes = [];
+    try { quizzes = await API.quizzes(this.curso.id); } catch (e) { Notif(e.message, "danger"); }
     if (!quizzes.length) {
       el.innerHTML = `<div class="empty-state"><i class="bi-patch-question"></i><p>No hay quizzes creados.</p></div>`;
       return;
@@ -311,7 +325,7 @@ const GestionCurso = {
             ${quizzes.map(q => `
               <tr>
                 <td class="fw-semibold text-sm">${q.titulo}</td>
-                <td class="text-sm">${q.preguntas.length}</td>
+                <td class="text-sm">${q.total_preguntas}</td>
                 <td class="text-sm">${q.tiempo_limite_min ? q.tiempo_limite_min + " min" : "Sin limite"}</td>
                 <td class="text-sm">${formatFecha(q.fecha_limite)}</td>
                 <td>
@@ -326,10 +340,14 @@ const GestionCurso = {
       </div>`;
   },
 
-  renderEstudiantes() {
+  async renderEstudiantes() {
     const el = document.getElementById("lista-estudiantes");
     if (!el) return;
-    const estudiantes = DB.getEstudiantesByCurso(this.curso.id);
+    let estudiantes = [];
+    try {
+      const insc = await API.inscripciones(this.curso.id);
+      estudiantes = insc.filter(i => i.rol_en_curso === "ESTUDIANTE");
+    } catch (e) { Notif(e.message, "danger"); }
     if (!estudiantes.length) {
       el.innerHTML = `<div class="empty-state"><i class="bi-people"></i><p>No hay estudiantes inscritos.</p></div>`;
       return;
@@ -337,27 +355,19 @@ const GestionCurso = {
     el.innerHTML = `
       <div class="table-container">
         <table class="table">
-          <thead><tr><th>Estudiante</th><th>Correo</th><th>Progreso</th></tr></thead>
+          <thead><tr><th>Estudiante</th><th>Correo</th><th>Inscripcion</th></tr></thead>
           <tbody>
-            ${estudiantes.map(e => {
-              const pct = DB.getProgresoCurso(e.id, this.curso.id);
-              return `
+            ${estudiantes.map(e => `
                 <tr>
                   <td>
                     <div style="display:flex;align-items:center;gap:8px">
-                      <div class="avatar avatar-sm">${DB.iniciales(e.nombres, e.apellidos)}</div>
-                      <span class="fw-semibold text-sm">${e.nombres} ${e.apellidos}</span>
+                      <div class="avatar avatar-sm">${inicialesDe(e.usuario_nombre)}</div>
+                      <span class="fw-semibold text-sm">${e.usuario_nombre}</span>
                     </div>
                   </td>
-                  <td class="text-sm text-muted">${e.correo}</td>
-                  <td style="min-width:140px">
-                    <div style="display:flex;align-items:center;gap:8px">
-                      <div class="progress-bar" style="flex:1"><div class="progress-fill ${pct===100?"success":""}" style="width:${pct}%"></div></div>
-                      <span class="text-xs text-muted">${pct}%</span>
-                    </div>
-                  </td>
-                </tr>`;
-            }).join("")}
+                  <td class="text-sm text-muted">${e.usuario_correo}</td>
+                  <td class="text-sm text-muted">${formatFecha(e.fecha)}</td>
+                </tr>`).join("")}
           </tbody>
         </table>
       </div>`;
@@ -378,28 +388,29 @@ const GestionCurso = {
       </div>`;
   },
 
-  inscribirEstudiante() {
+  async inscribirEstudiante() {
     const busqueda = document.getElementById("buscar-estudiante").value.trim().toLowerCase();
     if (!busqueda) return;
-    const usuario = DB.usuarios.find(u =>
-      (u.nombres.toLowerCase().includes(busqueda) ||
-       u.apellidos.toLowerCase().includes(busqueda) ||
-       u.identificacion.includes(busqueda)) && u.rol === "USER"
-    );
-    if (!usuario) { Notif("Usuario no encontrado.", "danger"); return; }
-    const yaInscrito = DB.inscripciones.some(i => i.usuario_id === usuario.id && i.curso_id === this.curso.id);
-    if (yaInscrito)  { Notif(`${usuario.nombres} ya esta inscrito en este curso.`, "danger"); return; }
-    DB.inscripciones.push({ id: DB.inscripciones.length + 1, usuario_id: usuario.id,
-      curso_id: this.curso.id, rol_en_curso: "ESTUDIANTE", fecha: new Date().toISOString().split("T")[0] });
-    Notif(`${usuario.nombres} inscrito correctamente.`);
-    document.getElementById("buscar-estudiante").value = "";
-    this.renderEstudiantes();
+    try {
+      const usuarios = await API.usuarios();
+      const usuario = usuarios.find(u =>
+        (u.nombres.toLowerCase().includes(busqueda) ||
+         u.apellidos.toLowerCase().includes(busqueda) ||
+         u.identificacion.includes(busqueda)) && u.rol === "USER"
+      );
+      if (!usuario) { Notif("Usuario no encontrado.", "danger"); return; }
+      await API.inscribir(this.curso.id, usuario.id, "ESTUDIANTE");
+      Notif(`${usuario.nombres} inscrito correctamente.`);
+      document.getElementById("buscar-estudiante").value = "";
+      this.curso.total_estudiantes++;
+      this.renderEstudiantes();
+    } catch (e) { Notif(e.message, "danger"); }
   }
 };
 
 /* ── MODULO FORM ─────────────────────────────────────────── */
 const ModuloForm = {
-  init() {
+  async init() {
     const u = initProfesorPage("Modulo");
     if (!u) return;
     const curso_id  = parseInt(getParams().get("curso_id"));
@@ -408,24 +419,28 @@ const ModuloForm = {
     document.getElementById("btn-volver").href = `curso.html?id=${curso_id}`;
 
     if (modulo_id) {
-      const m = DB.modulos.find(m => m.id === modulo_id);
-      if (m) {
-        document.getElementById("m-titulo").value      = m.titulo;
-        document.getElementById("m-descripcion").value = m.descripcion || "";
-        document.getElementById("m-orden").value       = m.orden;
-        this.renderMateriales(modulo_id);
-      }
+      try {
+        const modulos = await API.modulos(curso_id);
+        const m = modulos.find(m => m.id === modulo_id);
+        if (m) {
+          document.getElementById("m-titulo").value      = m.titulo;
+          document.getElementById("m-descripcion").value = m.descripcion || "";
+          document.getElementById("m-orden").value       = m.orden;
+          this.renderMateriales(m.materiales || []);
+        }
+      } catch (e) { Notif(e.message, "danger"); }
     } else {
-      const orden = DB.getModulosByCurso(curso_id).length + 1;
-      document.getElementById("m-orden").value = orden;
+      try {
+        const orden = (await API.modulos(curso_id)).length + 1;
+        document.getElementById("m-orden").value = orden;
+      } catch { document.getElementById("m-orden").value = 1; }
       document.getElementById("panel-materiales").style.display = "none";
     }
   },
 
-  renderMateriales(modulo_id) {
+  renderMateriales(mats) {
     const el = document.getElementById("lista-materiales");
     if (!el) return;
-    const mats = DB.getMaterialesByModulo(modulo_id);
     if (!mats.length) {
       el.innerHTML = `<div class="empty-state" style="padding:24px"><i class="bi-folder2-open"></i><p>Sin materiales aun.</p></div>`;
       return;
@@ -433,17 +448,17 @@ const ModuloForm = {
     el.innerHTML = mats.map(mat => `
       <div class="material-item">
         <div class="material-icon ${mat.tipo}">
-          <i class="bi-${mat.tipo === "video" ? "play-circle" : "file-pdf"}"></i>
+          <i class="bi-${mat.tipo === "video" ? "play-circle" : mat.tipo === "pdf" ? "file-pdf" : "link-45deg"}"></i>
         </div>
         <div class="material-info">
           <strong>${mat.titulo}</strong>
-          <span class="text-xs text-muted">${mat.tipo === "video" ? "Video externo" : "Documento PDF"}</span>
+          <span class="text-xs text-muted">${mat.tipo === "video" ? "Video externo" : mat.tipo === "pdf" ? "Documento PDF" : "Enlace externo"}</span>
         </div>
         <a href="${mat.url}" target="_blank" class="btn btn-ghost btn-sm"><i class="bi-box-arrow-up-right"></i></a>
       </div>`).join("");
   },
 
-  guardarModulo() {
+  async guardarModulo() {
     const curso_id  = parseInt(getParams().get("curso_id"));
     const modulo_id = parseInt(getParams().get("modulo_id")) || null;
     const titulo    = document.getElementById("m-titulo").value.trim();
@@ -451,35 +466,40 @@ const ModuloForm = {
     const orden     = parseInt(document.getElementById("m-orden").value) || 1;
     if (!titulo) { Notif("El titulo es obligatorio.", "danger"); return; }
 
-    if (modulo_id) {
-      const m = DB.modulos.find(m => m.id === modulo_id);
-      if (m) { m.titulo = titulo; m.descripcion = descripcion; m.orden = orden; }
-      Notif("Modulo actualizado.");
-    } else {
-      DB.modulos.push({ id: DB.modulos.length + 1, curso_id, orden, titulo, descripcion });
-      Notif("Modulo creado.");
-    }
-    setTimeout(() => { window.location.href = `curso.html?id=${curso_id}`; }, 800);
+    try {
+      if (modulo_id) {
+        await API.actualizarModulo(modulo_id, { titulo, descripcion, orden });
+        Notif("Modulo actualizado.");
+      } else {
+        await API.crearModulo(curso_id, { titulo, descripcion, orden });
+        Notif("Modulo creado.");
+      }
+      setTimeout(() => { window.location.href = `curso.html?id=${curso_id}`; }, 800);
+    } catch (e) { Notif(e.message, "danger"); }
   },
 
-  agregarMaterial() {
+  async agregarMaterial() {
     const modulo_id = parseInt(getParams().get("modulo_id"));
     if (!modulo_id) { Notif("Guarda el modulo primero.", "danger"); return; }
     const tipo   = document.getElementById("mat-tipo").value;
     const titulo = document.getElementById("mat-titulo").value.trim();
     const url    = document.getElementById("mat-url").value.trim();
     if (!titulo || !url) { Notif("Titulo y URL son obligatorios.", "danger"); return; }
-    DB.materiales.push({ id: DB.materiales.length + 1, modulo_id, tipo, titulo, url });
-    document.getElementById("mat-titulo").value = "";
-    document.getElementById("mat-url").value    = "";
-    this.renderMateriales(modulo_id);
-    Notif("Material agregado.");
+    try {
+      await API.crearMaterial(modulo_id, { tipo, titulo, url });
+      document.getElementById("mat-titulo").value = "";
+      document.getElementById("mat-url").value    = "";
+      const modulos = await API.modulos(parseInt(getParams().get("curso_id")));
+      const m = modulos.find(m => m.id === modulo_id);
+      this.renderMateriales(m ? (m.materiales || []) : []);
+      Notif("Material agregado.");
+    } catch (e) { Notif(e.message, "danger"); }
   }
 };
 
 /* ── TAREA FORM ──────────────────────────────────────────── */
 const TareaForm = {
-  init() {
+  async init() {
     const u = initProfesorPage("Tarea");
     if (!u) return;
     const curso_id = parseInt(getParams().get("curso_id"));
@@ -487,18 +507,18 @@ const TareaForm = {
     document.getElementById("btn-volver").href = `curso.html?id=${curso_id}`;
 
     if (tarea_id) {
-      const t = DB.tareas.find(t => t.id === tarea_id);
-      if (t) {
+      try {
+        const t = await API.tareaDetalle(tarea_id);
         document.getElementById("t-titulo").value      = t.titulo;
         document.getElementById("t-descripcion").value = t.descripcion;
-        document.getElementById("t-limite").value      = t.fecha_limite;
+        document.getElementById("t-limite").value      = (t.fecha_limite || "").slice(0, 16);
         document.getElementById("t-puntaje").value     = t.puntaje_maximo;
         document.getElementById("t-criterios").value   = t.criterios || "";
-      }
+      } catch (e) { Notif(e.message, "danger"); }
     }
   },
 
-  guardar() {
+  async guardar() {
     const curso_id = parseInt(getParams().get("curso_id"));
     const tarea_id = parseInt(getParams().get("tarea_id")) || null;
     const titulo      = document.getElementById("t-titulo").value.trim();
@@ -510,30 +530,35 @@ const TareaForm = {
     if (!titulo || !descripcion || !fecha_limite || !puntaje_maximo) {
       Notif("Completa todos los campos obligatorios.", "danger"); return;
     }
+    const payload = { titulo, descripcion, fecha_limite, puntaje_maximo, criterios };
 
-    if (tarea_id) {
-      const t = DB.tareas.find(t => t.id === tarea_id);
-      if (t) Object.assign(t, { titulo, descripcion, fecha_limite, puntaje_maximo, criterios });
-      Notif("Tarea actualizada.");
-    } else {
-      DB.tareas.push({ id: DB.tareas.length + 1, curso_id, titulo, descripcion, fecha_limite, puntaje_maximo, criterios });
-      Notif("Tarea creada.");
-    }
-    setTimeout(() => { window.location.href = `curso.html?id=${curso_id}`; }, 800);
+    try {
+      if (tarea_id) {
+        await API.actualizarTarea(tarea_id, payload);
+        Notif("Tarea actualizada.");
+      } else {
+        await API.crearTarea(curso_id, payload);
+        Notif("Tarea creada.");
+      }
+      setTimeout(() => { window.location.href = `curso.html?id=${curso_id}`; }, 800);
+    } catch (e) { Notif(e.message, "danger"); }
   }
 };
 
 /* ── TAREA ENTREGAS ──────────────────────────────────────── */
 const TareaEntregas = {
   tarea: null,
+  _entregas: {},   // usuario_id -> entrega
+  _nombres: {},    // usuario_id -> nombre
 
-  init() {
+  async init() {
     const u = initProfesorPage("Entregas");
     if (!u) return;
     const tarea_id = parseInt(getParams().get("tarea_id"));
     const curso_id = parseInt(getParams().get("curso_id"));
-    this.tarea = DB.tareas.find(t => t.id === tarea_id);
-    if (!this.tarea) return;
+    try {
+      this.tarea = await API.tareaDetalle(tarea_id);
+    } catch (e) { Notif(e.message, "danger"); return; }
 
     document.getElementById("tarea-titulo").textContent    = this.tarea.titulo;
     document.getElementById("tarea-puntaje").textContent   = `Puntaje maximo: ${this.tarea.puntaje_maximo} pts`;
@@ -542,26 +567,38 @@ const TareaEntregas = {
     this.renderEntregas(tarea_id, curso_id);
   },
 
-  renderEntregas(tarea_id, curso_id) {
+  async renderEntregas(tarea_id, curso_id) {
     const tbody = document.getElementById("tabla-entregas");
     if (!tbody) return;
-    const estudiantes = DB.getEstudiantesByCurso(curso_id);
+    let estudiantes = [], entregas = [];
+    try {
+      [estudiantes, entregas] = await Promise.all([
+        API.inscripciones(curso_id).then(ins => ins.filter(i => i.rol_en_curso === "ESTUDIANTE")),
+        API.entregas(tarea_id)
+      ]);
+    } catch (e) { Notif(e.message, "danger"); return; }
+
+    this._entregas = {};
+    this._nombres  = {};
+    entregas.forEach(e => { this._entregas[e.usuario] = e; });
+    estudiantes.forEach(e => { this._nombres[e.usuario] = e.usuario_nombre; });
+
     tbody.innerHTML = estudiantes.map(e => {
-      const entrega = DB.getEntregaByTareaYUsuario(tarea_id, e.id);
+      const entrega = this._entregas[e.usuario];
       const estadoBadge = !entrega || entrega.estado === "pendiente"
         ? `<span class="badge badge-neutral">Pendiente</span>`
         : `<span class="badge badge-success">Entregado</span>`;
-      const notaDisplay = entrega && entrega.nota !== null
+      const notaDisplay = entrega && entrega.nota !== null && entrega.nota !== undefined
         ? `<span class="fw-semibold text-primary">${entrega.nota}</span>`
         : `<span class="text-muted text-sm">Sin calificar</span>`;
       return `
         <tr>
           <td>
             <div style="display:flex;align-items:center;gap:8px">
-              <div class="avatar avatar-sm">${DB.iniciales(e.nombres, e.apellidos)}</div>
+              <div class="avatar avatar-sm">${inicialesDe(e.usuario_nombre)}</div>
               <div>
-                <div class="fw-semibold text-sm">${e.nombres} ${e.apellidos}</div>
-                <div class="text-xs text-muted">${e.correo}</div>
+                <div class="fw-semibold text-sm">${e.usuario_nombre}</div>
+                <div class="text-xs text-muted">${e.usuario_correo}</div>
               </div>
             </div>
           </td>
@@ -571,8 +608,8 @@ const TareaEntregas = {
           <td>
             <div class="table-actions">
               ${entrega && entrega.estado === "entregado"
-                ? `<button class="btn btn-ghost btn-sm" onclick="TareaEntregas.verEntrega(${e.id},${tarea_id})"><i class="bi-eye"></i> Ver</button>
-                   <button class="btn btn-primary btn-sm" onclick="ModalCalificar.abrir(${e.id},${tarea_id})"><i class="bi-award"></i> Calificar</button>`
+                ? `<button class="btn btn-ghost btn-sm" onclick="TareaEntregas.verEntrega(${e.usuario})"><i class="bi-eye"></i> Ver</button>
+                   <button class="btn btn-primary btn-sm" onclick="ModalCalificar.abrir(${e.usuario})"><i class="bi-award"></i> Calificar</button>`
                 : `<span class="text-muted text-sm">—</span>`}
             </div>
           </td>
@@ -580,12 +617,11 @@ const TareaEntregas = {
     }).join("");
   },
 
-  verEntrega(usuario_id, tarea_id) {
-    const e = DB.getEntregaByTareaYUsuario(tarea_id, usuario_id);
-    const u = DB.getUsuarioById(usuario_id);
+  verEntrega(usuario_id) {
+    const e = this._entregas[usuario_id];
     if (!e) return;
     const modal = document.getElementById("modal-entrega");
-    document.getElementById("entrega-estudiante").textContent = `${u.nombres} ${u.apellidos}`;
+    document.getElementById("entrega-estudiante").textContent = this._nombres[usuario_id] || "";
     const cont = document.getElementById("entrega-contenido");
     cont.innerHTML = "";
     if (e.texto)   cont.innerHTML += `<div class="form-group"><label class="form-label">Texto:</label><p class="text-sm" style="background:#F9FAFB;padding:12px;border-radius:8px;margin:0">${e.texto}</p></div>`;
@@ -597,15 +633,14 @@ const TareaEntregas = {
 };
 
 const ModalCalificar = {
-  usuarioId: null, tareaId: null,
+  usuarioId: null,
 
-  abrir(usuario_id, tarea_id) {
-    this.usuarioId = usuario_id; this.tareaId = tarea_id;
-    const e = DB.getEntregaByTareaYUsuario(tarea_id, usuario_id);
-    const u = DB.getUsuarioById(usuario_id);
-    const t = DB.tareas.find(t => t.id === tarea_id);
-    document.getElementById("cal-estudiante").textContent = `${u.nombres} ${u.apellidos}`;
-    document.getElementById("cal-nota").value             = e && e.nota !== null ? e.nota : "";
+  abrir(usuario_id) {
+    this.usuarioId = usuario_id;
+    const e = TareaEntregas._entregas[usuario_id];
+    const t = TareaEntregas.tarea;
+    document.getElementById("cal-estudiante").textContent = TareaEntregas._nombres[usuario_id] || "";
+    document.getElementById("cal-nota").value             = e && e.nota !== null && e.nota !== undefined ? e.nota : "";
     document.getElementById("cal-nota").max               = t ? t.puntaje_maximo : 100;
     document.getElementById("cal-comentario").value       = e && e.comentario ? e.comentario : "";
     document.getElementById("modal-calificar").classList.add("open");
@@ -613,19 +648,22 @@ const ModalCalificar = {
 
   cerrar() { document.getElementById("modal-calificar").classList.remove("open"); },
 
-  guardar() {
+  async guardar() {
     const nota = parseFloat(document.getElementById("cal-nota").value);
     const comentario = document.getElementById("cal-comentario").value.trim();
-    const t = DB.tareas.find(t => t.id === this.tareaId);
+    const t = TareaEntregas.tarea;
     if (isNaN(nota) || nota < 0 || nota > t.puntaje_maximo) {
       Notif(`Nota invalida. Debe estar entre 0 y ${t.puntaje_maximo}.`, "danger"); return;
     }
-    const e = DB.getEntregaByTareaYUsuario(this.tareaId, this.usuarioId);
-    if (e) { e.nota = nota; e.comentario = comentario; }
-    this.cerrar();
-    const curso_id = parseInt(getParams().get("curso_id"));
-    TareaEntregas.renderEntregas(this.tareaId, curso_id);
-    Notif("Calificacion guardada.");
+    const e = TareaEntregas._entregas[this.usuarioId];
+    if (!e) { Notif("No hay entrega para calificar.", "danger"); return; }
+    try {
+      await API.calificar(e.id, { nota, comentario });
+      this.cerrar();
+      const curso_id = parseInt(getParams().get("curso_id"));
+      TareaEntregas.renderEntregas(t.id, curso_id);
+      Notif("Calificacion guardada.");
+    } catch (err) { Notif(err.message, "danger"); }
   }
 };
 
@@ -633,7 +671,7 @@ const ModalCalificar = {
 const QuizForm = {
   preguntaIndex: 0,
 
-  init() {
+  async init() {
     const u = initProfesorPage("Quiz");
     if (!u) return;
     const curso_id = parseInt(getParams().get("curso_id"));
@@ -641,14 +679,14 @@ const QuizForm = {
     document.getElementById("btn-volver").href = `curso.html?id=${curso_id}`;
 
     if (quiz_id) {
-      const q = DB.quizzes.find(q => q.id === quiz_id);
-      if (q) {
+      try {
+        const q = await API.quizDetalle(quiz_id);
         document.getElementById("q-titulo").value     = q.titulo;
         document.getElementById("q-descripcion").value= q.descripcion || "";
         document.getElementById("q-tiempo").value     = q.tiempo_limite_min || "";
-        document.getElementById("q-limite").value     = q.fecha_limite;
-        q.preguntas.forEach(p => this.renderPregunta(p));
-      }
+        document.getElementById("q-limite").value     = (q.fecha_limite || "").slice(0, 16);
+        (q.preguntas || []).forEach(p => this.renderPregunta(p));
+      } catch (e) { Notif(e.message, "danger"); }
     }
   },
 
@@ -684,7 +722,8 @@ const QuizForm = {
       "menu_desplegable","seleccion_imagen"].includes(p.tipo);
 
     const div = document.createElement("div");
-    div.className = "card";
+    div.className = "card preg-card";
+    div.dataset.tipo = p.tipo;
     div.style.marginBottom = "16px";
     div.innerHTML = `
       <div class="card-header">
@@ -715,27 +754,30 @@ const QuizForm = {
   renderInputPregunta(p, idx) {
     switch(p.tipo) {
       case "opcion_multiple_una":
-      case "opcion_multiple_varias":
-        const opts = (p.opciones || ["",""]).map((o, i) => `
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-            <input type="${p.tipo === "opcion_multiple_una" ? "radio" : "checkbox"}" name="resp-${idx}" ${p.respuesta_correcta === i ? "checked" : ""}>
-            <input type="text" class="form-control" value="${o}" placeholder="Opcion ${i+1}">
+      case "opcion_multiple_varias": {
+        const tipoInput = p.tipo === "opcion_multiple_una" ? "radio" : "checkbox";
+        const correctas = Array.isArray(p.respuesta_correcta) ? p.respuesta_correcta : [p.respuesta_correcta];
+        const opts = (p.opciones && p.opciones.length ? p.opciones : ["",""]).map((o, i) => `
+          <div class="opt-row" style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+            <input type="${tipoInput}" class="opt-correct" name="resp-${idx}" ${correctas.includes(i) ? "checked" : ""}>
+            <input type="text" class="form-control opt-text" value="${o}" placeholder="Opcion ${i+1}">
           </div>`).join("");
-        return `<div><label class="form-label text-xs text-muted">OPCIONES (marca la correcta)</label>${opts}
-          <button class="btn btn-ghost btn-sm" onclick=""><i class="bi-plus"></i> Agregar opcion</button></div>`;
+        return `<div class="opciones-wrap" data-name="resp-${idx}"><label class="form-label text-xs text-muted">OPCIONES (marca la correcta)</label>${opts}
+          <button class="btn btn-ghost btn-sm" onclick="QuizForm.agregarOpcion(this, '${tipoInput}', 'resp-${idx}')"><i class="bi-plus"></i> Agregar opcion</button></div>`;
+      }
 
       case "verdadero_falso":
         return `<div><label class="form-label text-xs text-muted">RESPUESTA CORRECTA</label>
           <div style="display:flex;gap:12px;margin-top:6px">
-            <label style="display:flex;align-items:center;gap:6px"><input type="radio" name="vf-${idx}" ${p.respuesta_correcta === true ? "checked" : ""}> Verdadero</label>
-            <label style="display:flex;align-items:center;gap:6px"><input type="radio" name="vf-${idx}" ${p.respuesta_correcta === false ? "checked" : ""}> Falso</label>
+            <label style="display:flex;align-items:center;gap:6px"><input type="radio" class="vf-opt" name="vf-${idx}" value="true" ${p.respuesta_correcta === true ? "checked" : ""}> Verdadero</label>
+            <label style="display:flex;align-items:center;gap:6px"><input type="radio" class="vf-opt" name="vf-${idx}" value="false" ${p.respuesta_correcta === false ? "checked" : ""}> Falso</label>
           </div></div>`;
 
       case "completar_espacios":
       case "respuesta_numerica":
       case "menu_desplegable":
         return `<div class="form-group"><label class="form-label text-xs text-muted">RESPUESTA CORRECTA</label>
-          <input type="${p.tipo === "respuesta_numerica" ? "number" : "text"}" class="form-control" value="${p.respuesta_correcta || ""}" placeholder="Respuesta esperada"></div>`;
+          <input type="${p.tipo === "respuesta_numerica" ? "number" : "text"}" class="form-control resp-unica" value="${p.respuesta_correcta != null ? p.respuesta_correcta : ""}" placeholder="Respuesta esperada"></div>`;
 
       case "respuesta_corta":
       case "ensayo":
@@ -761,7 +803,52 @@ const QuizForm = {
     }
   },
 
-  guardar() {
+  agregarOpcion(btn, tipoInput, name) {
+    const wrap = btn.closest(".opciones-wrap");
+    const n = wrap.querySelectorAll(".opt-row").length;
+    const row = document.createElement("div");
+    row.className = "opt-row";
+    row.style.cssText = "display:flex;align-items:center;gap:8px;margin-bottom:6px";
+    row.innerHTML = `
+      <input type="${tipoInput}" class="opt-correct" name="${name}">
+      <input type="text" class="form-control opt-text" placeholder="Opcion ${n+1}">`;
+    btn.before(row);
+  },
+
+  /* Lee las preguntas desde el DOM para enviarlas al backend */
+  collectPreguntas() {
+    const cards = Array.from(document.querySelectorAll("#preguntas-container .preg-card"));
+    return cards.map(card => {
+      const tipo      = card.dataset.tipo;
+      const enunciado = card.querySelector(".preg-enunciado").value.trim();
+      const puntaje   = parseFloat(card.querySelector(".preg-puntaje").value) || 1;
+      let opciones = [];
+      let respuesta_correcta = null;
+
+      if (tipo === "opcion_multiple_una" || tipo === "opcion_multiple_varias") {
+        const rows = Array.from(card.querySelectorAll(".opt-row"));
+        opciones = rows.map(r => r.querySelector(".opt-text").value.trim());
+        const marcadas = rows.reduce((acc, r, i) => {
+          if (r.querySelector(".opt-correct").checked) acc.push(i);
+          return acc;
+        }, []);
+        respuesta_correcta = tipo === "opcion_multiple_una" ? (marcadas[0] ?? null) : marcadas;
+      } else if (tipo === "verdadero_falso") {
+        const sel = card.querySelector(".vf-opt:checked");
+        respuesta_correcta = sel ? (sel.value === "true") : null;
+      } else if (tipo === "respuesta_numerica") {
+        const v = card.querySelector(".resp-unica");
+        respuesta_correcta = v && v.value !== "" ? parseFloat(v.value) : null;
+      } else if (tipo === "completar_espacios" || tipo === "menu_desplegable") {
+        const v = card.querySelector(".resp-unica");
+        respuesta_correcta = v ? v.value.trim() : null;
+      }
+
+      return { tipo, enunciado, puntaje, opciones, respuesta_correcta };
+    });
+  },
+
+  async guardar() {
     const curso_id = parseInt(getParams().get("curso_id"));
     const quiz_id  = parseInt(getParams().get("quiz_id")) || null;
     const titulo   = document.getElementById("q-titulo").value.trim();
@@ -770,47 +857,62 @@ const QuizForm = {
     const limite   = document.getElementById("q-limite").value;
     if (!titulo || !limite) { Notif("Titulo y fecha limite son obligatorios.", "danger"); return; }
 
-    if (quiz_id) {
-      const q = DB.quizzes.find(q => q.id === quiz_id);
-      if (q) Object.assign(q, { titulo, descripcion, tiempo_limite_min: tiempo, fecha_limite: limite });
-      Notif("Quiz actualizado.");
-    } else {
-      DB.quizzes.push({ id: DB.quizzes.length + 1, curso_id, titulo, descripcion,
-        tiempo_limite_min: tiempo, fecha_limite: limite, preguntas: [] });
-      Notif("Quiz creado.");
-    }
-    setTimeout(() => { window.location.href = `curso.html?id=${curso_id}`; }, 800);
+    const preguntas = this.collectPreguntas();
+    if (preguntas.some(p => !p.enunciado)) { Notif("Todas las preguntas necesitan un enunciado.", "danger"); return; }
+
+    const payload = { titulo, descripcion, tiempo_limite_min: tiempo, fecha_limite: limite, preguntas };
+
+    try {
+      if (quiz_id) {
+        await API.actualizarQuiz(quiz_id, payload);
+        Notif("Quiz actualizado.");
+      } else {
+        await API.crearQuiz(curso_id, payload);
+        Notif("Quiz creado.");
+      }
+      setTimeout(() => { window.location.href = `curso.html?id=${curso_id}`; }, 800);
+    } catch (e) { Notif(e.message, "danger"); }
   }
 };
 
 /* ── QUIZ RESULTADOS ─────────────────────────────────────── */
 const QuizResultados = {
-  init() {
+  async init() {
     const u = initProfesorPage("Resultados del Quiz");
     if (!u) return;
     const quiz_id  = parseInt(getParams().get("quiz_id"));
     const curso_id = parseInt(getParams().get("curso_id"));
-    const quiz     = DB.quizzes.find(q => q.id === quiz_id);
-    if (!quiz) return;
+
+    let quiz, estudiantes = [], respuestas = [];
+    try {
+      [quiz, estudiantes, respuestas] = await Promise.all([
+        API.quizDetalle(quiz_id),
+        API.inscripciones(curso_id).then(ins => ins.filter(i => i.rol_en_curso === "ESTUDIANTE")),
+        API.respuestasQuiz(quiz_id)
+      ]);
+    } catch (e) { Notif(e.message, "danger"); return; }
 
     document.getElementById("quiz-titulo").textContent  = quiz.titulo;
-    document.getElementById("quiz-preguntas").textContent = `${quiz.preguntas.length} preguntas`;
+    document.getElementById("quiz-preguntas").textContent = `${(quiz.preguntas || []).length} preguntas`;
     document.getElementById("btn-volver").href = `curso.html?id=${curso_id}`;
+
+    const minimo = parseInt(localStorage.getItem("porcentaje_minimo") || "60");
+    const respPorUsuario = {};
+    respuestas.forEach(r => { respPorUsuario[r.usuario] = r; });
 
     const tbody = document.getElementById("tabla-resultados");
     if (!tbody) return;
-    const estudiantes = DB.getEstudiantesByCurso(curso_id);
     tbody.innerHTML = estudiantes.map(e => {
-      const resp = DB.respuestas_quiz.find(r => r.usuario_id === e.id && r.quiz_id === quiz_id);
+      const resp = respPorUsuario[e.usuario];
       const notaBadge = resp
-        ? `<span class="badge badge-${resp.nota_automatica >= DB.config.porcentaje_minimo_aprobacion ? "success" : "warning"}">${resp.nota_automatica} pts</span>`
+        ? `<span class="badge badge-${parseFloat(resp.nota_automatica) >= minimo ? "success" : "warning"}">${resp.nota_automatica} pts</span>`
         : `<span class="badge badge-neutral">Sin responder</span>`;
       return `
         <tr>
           <td>
             <div style="display:flex;align-items:center;gap:8px">
-              <div class="avatar avatar-sm">${DB.iniciales(e.nombres, e.apellidos)}</div>
-              <span class="fw-semibold text-sm">${e.nombres} ${e.apellidos}</span>
+              <div class="avatar avatar-sm">${inicialesDe(e.usuario_nombre)}</div>
+              <span class="fw-semibold text-sm">${e.usuario_nombre}</span>
             </div>
           </td>
           <td>${resp ? formatFecha(resp.fecha) : "—"}</td>
