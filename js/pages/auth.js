@@ -52,8 +52,7 @@ const Auth = {
     window.location.href = rutas[usuario.rol] || BASE_PATH + "index.html";
   },
 
-  async logout() {
-    await API.logout().catch(() => {});
+  logout() {
     sessionStorage.clear();
     window.location.href = BASE_PATH + "index.html";
   },
